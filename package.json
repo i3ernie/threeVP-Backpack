@@ -34,7 +34,8 @@
         "threeVP-MaterialFactory" : "git://github.com/i3ernie/threeVP-MaterialFactory.js.git",
         "threeVP-Extras"        : "git://github.com/i3ernie/threeVP-Extras.js.git",
         "threeVP-Animation"     : "git://github.com/i3ernie/threeVP-Animation.js.git",
-        "threeVP-Loader"        : "git://github.com/i3ernie/threeVP-Loader.js.git"
+        "threeVP-Loader"        : "git://github.com/i3ernie/threeVP-Loader.js.git",
+        "threeVP-Interactive" : "git://github.com/i3ernie/threeVP-Interactive.js.git"
     },
     
     "devDependencies": {
