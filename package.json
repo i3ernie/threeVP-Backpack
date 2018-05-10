@@ -1,18 +1,22 @@
 {
     "name": "threeVP-Backpack",
     "version": "0.0.1",
-    "keywords": ["util", "functional", "server", "client", "browser"],
-    "license" : "MIT",
-    
-    "repository" :
-    {
-        "type" : "git",
-        "url" : "git://github.com/i3ernie/threeVP-Backpack.js.git"
+    "keywords": [
+        "util",
+        "functional",
+        "server",
+        "client",
+        "browser"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/i3ernie/threeVP-Backpack.js.git"
     },
-    
     "author": "bernie",
-    "contributors": ["b.hessberger@gmail.com"],
-    
+    "contributors": [
+        "b.hessberger@gmail.com"
+    ],
     "directories": {
         "dist": "dist",
         "doc": "docs",
@@ -27,23 +31,21 @@
         "dist/threeVP.min.js",
         "package.json",
         "src"
-      ],
-    
+    ],
     "dependencies": {
-        "threeVP"               : "git://github.com/i3ernie/threeVP.js.git",
-        "threeVP-MaterialFactory" : "git://github.com/i3ernie/threeVP-MaterialFactory.js.git",
-        "threeVP-Extras"        : "git://github.com/i3ernie/threeVP-Extras.js.git",
-        "threeVP-Animation"     : "git://github.com/i3ernie/threeVP-Animation.js.git",
-        "threeVP-Loader"        : "git://github.com/i3ernie/threeVP-Loader.js.git",
-        "threeVP-Interactive" : "git://github.com/i3ernie/threeVP-Interactive.js.git"
+        "threeVP": "git://github.com/i3ernie/threeVP.js.git",
+        "threeVP-Animation": "git://github.com/i3ernie/threeVP-Animation.js.git",
+        "threeVP-Extras": "git://github.com/i3ernie/threeVP-Extras.js.git",
+        "threeVP-Interactive": "git://github.com/i3ernie/threeVP-Interactive.js.git",
+        "threeVP-Loader": "git://github.com/i3ernie/threeVP-Loader.js.git",
+        "threeVP-MaterialFactory": "git://github.com/i3ernie/threeVP-MaterialFactory.js.git"
     },
-    
     "devDependencies": {
-        "requirejs"         : "latest",
-        "lodash"            : "latest",
-        "gulp"              : "latest",
-        "gulp-load-plugins" : "latest",
-        "gulp-requirejs"    : "latest",
-        "gulp-uglify"       : "latest"
+        "gulp": "latest",
+        "gulp-load-plugins": "latest",
+        "gulp-requirejs": "latest",
+        "gulp-uglify": "latest",
+        "lodash": "^4.17.10",
+        "requirejs": "latest"
     }
 }
