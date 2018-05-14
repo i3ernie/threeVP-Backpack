@@ -94509,7 +94509,7 @@ define('Draggable',["lodash", "cmd"], function ( _, CMD )
             this.DomEvents = VP.DomEvents;
         },
         
-        makeDraggable : function( el, opt ){
+        makeDraggable : function( el, opt ) {
             if ( this.DomEvents === null ) {
                 console.log( "Draggable.VP is null, you must set aktive VP" );
                 return;
@@ -94598,10 +94598,12 @@ define('utilities/IntersectPlane',["three", "lodash"], function ( THREE, _ ) {
         this.camera = VP.camera;
         this.enabled = false;
         this.visible = false;
+        
+        var side = this.options.opacity < .01 ? THREE.BackSide : THREE.FrontSide;
 
         THREE.Mesh.call( this,
             new THREE.PlaneGeometry( this.options.width, this.options.height ),
-            new THREE.MeshBasicMaterial({ opacity: this.options.opacity, transparent: true })
+            new THREE.MeshBasicMaterial({ opacity: this.options.opacity, transparent: true, side : side })
         );
 
         this._handleMouseMove = function(){ scope.handleMouseMove.apply(scope, arguments); };
@@ -94772,7 +94774,169 @@ define('threeVP-Interactive',["Draggable", "Interactive", "plugins/plg.Tracking"
 
 
 
-define('postprocessing/EffectComposer',["three"], function(THREE){
+define('shaders/CopyShader',["three"], function(THREE){
+/**
+ * @author alteredq / http://alteredqualia.com/
+ *
+ * Full-screen textured quad shader
+ */
+
+THREE.CopyShader = {
+
+	uniforms: {
+
+		"tDiffuse": { value: null },
+		"opacity":  { value: 1.0 }
+
+	},
+
+	vertexShader: [
+
+		"varying vec2 vUv;",
+
+		"void main() {",
+
+			"vUv = uv;",
+			"gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );",
+
+		"}"
+
+	].join( "\n" ),
+
+	fragmentShader: [
+
+		"uniform float opacity;",
+
+		"uniform sampler2D tDiffuse;",
+
+		"varying vec2 vUv;",
+
+		"void main() {",
+
+			"vec4 texel = texture2D( tDiffuse, vUv );",
+			"gl_FragColor = opacity * texel;",
+
+		"}"
+
+	].join( "\n" )
+
+};
+
+ return THREE.CopyShader;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('libs/Pass',["three"], function( THREE ){   
+
+    THREE.Pass = function () {
+
+            // if set to true, the pass is processed by the composer
+            this.enabled = true;
+
+            // if set to true, the pass indicates to swap read and write buffer after rendering
+            this.needsSwap = true;
+
+            // if set to true, the pass clears its buffer before rendering
+            this.clear = false;
+
+            // if set to true, the result of the pass is rendered to screen
+            this.renderToScreen = false;
+
+    };
+
+    Object.assign( THREE.Pass.prototype, {
+
+            setSize: function ( width, height ) {},
+
+            render: function ( renderer, writeBuffer, readBuffer, delta, maskActive ) {
+
+                    console.error( 'THREE.Pass: .render() must be implemented in derived pass.' );
+
+            }
+
+    } );
+    
+    return THREE.Pass;
+
+} );
+
+
+
+define('postprocessing/ShaderPass',["three", "libs/Pass"], function(THREE, Pass){
+/**
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.ShaderPass = function ( shader, textureID ) {
+
+	THREE.Pass.call( this );
+
+	this.textureID = ( textureID !== undefined ) ? textureID : "tDiffuse";
+
+	if ( shader instanceof THREE.ShaderMaterial ) {
+
+		this.uniforms = shader.uniforms;
+
+		this.material = shader;
+
+	} else if ( shader ) {
+
+		this.uniforms = THREE.UniformsUtils.clone( shader.uniforms );
+
+		this.material = new THREE.ShaderMaterial( {
+
+			defines: Object.assign( {}, shader.defines ),
+			uniforms: this.uniforms,
+			vertexShader: shader.vertexShader,
+			fragmentShader: shader.fragmentShader
+
+		} );
+
+	}
+
+	this.camera = new THREE.OrthographicCamera( - 1, 1, 1, - 1, 0, 1 );
+	this.scene = new THREE.Scene();
+
+	this.quad = new THREE.Mesh( new THREE.PlaneBufferGeometry( 2, 2 ), null );
+	this.quad.frustumCulled = false; // Avoid getting clipped
+	this.scene.add( this.quad );
+
+};
+
+THREE.ShaderPass.prototype = Object.assign( Object.create( THREE.Pass.prototype ), {
+
+	constructor: THREE.ShaderPass,
+
+	render: function( renderer, writeBuffer, readBuffer, delta, maskActive ) {
+
+		if ( this.uniforms[ this.textureID ] ) {
+
+			this.uniforms[ this.textureID ].value = readBuffer.texture;
+
+		}
+
+		this.quad.material = this.material;
+
+		if ( this.renderToScreen ) {
+
+			renderer.render( this.scene, this.camera );
+
+		} else {
+
+			renderer.render( this.scene, this.camera, writeBuffer, this.clear );
+
+		}
+
+	}
+
+} );
+
+ return THREE.ShaderPass;
+});
+define('postprocessing/EffectComposer',["three", "shaders/CopyShader", "postprocessing/ShaderPass"], function(THREE){
 /**
  * @author alteredq / http://alteredqualia.com/
  */
@@ -94965,7 +95129,7 @@ Object.assign( THREE.Pass.prototype, {
 
  return THREE.EffectComposer;
 });
-define('postprocessing/RenderPass',["three"], function(THREE){
+define('postprocessing/RenderPass',["three", "libs/Pass"], function(THREE, Pass){
 /**
  * @author alteredq / http://alteredqualia.com/
  */
@@ -96974,56 +97138,6 @@ THREE.SSAOShader = {
 };
 
  return THREE.SSAOShader;
-});
-define('shaders/CopyShader',["three"], function(THREE){
-/**
- * @author alteredq / http://alteredqualia.com/
- *
- * Full-screen textured quad shader
- */
-
-THREE.CopyShader = {
-
-	uniforms: {
-
-		"tDiffuse": { value: null },
-		"opacity":  { value: 1.0 }
-
-	},
-
-	vertexShader: [
-
-		"varying vec2 vUv;",
-
-		"void main() {",
-
-			"vUv = uv;",
-			"gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );",
-
-		"}"
-
-	].join( "\n" ),
-
-	fragmentShader: [
-
-		"uniform float opacity;",
-
-		"uniform sampler2D tDiffuse;",
-
-		"varying vec2 vUv;",
-
-		"void main() {",
-
-			"vec4 texel = texture2D( tDiffuse, vUv );",
-			"gl_FragColor = opacity * texel;",
-
-		"}"
-
-	].join( "\n" )
-
-};
-
- return THREE.CopyShader;
 });
 /* 
  * To change this license header, choose License Headers in Project Properties.
