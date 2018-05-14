@@ -23,7 +23,7 @@ define('Draggable',["lodash", "cmd"], function ( _, CMD )
             this.DomEvents = VP.DomEvents;
         },
         
-        makeDraggable : function( el, opt ){
+        makeDraggable : function( el, opt ) {
             if ( this.DomEvents === null ) {
                 console.log( "Draggable.VP is null, you must set aktive VP" );
                 return;
@@ -112,10 +112,12 @@ define('utilities/IntersectPlane',["three", "lodash"], function ( THREE, _ ) {
         this.camera = VP.camera;
         this.enabled = false;
         this.visible = false;
+        
+        var side = this.options.opacity < .01 ? THREE.BackSide : THREE.FrontSide;
 
         THREE.Mesh.call( this,
             new THREE.PlaneGeometry( this.options.width, this.options.height ),
-            new THREE.MeshBasicMaterial({ opacity: this.options.opacity, transparent: true })
+            new THREE.MeshBasicMaterial({ opacity: this.options.opacity, transparent: true, side : side })
         );
 
         this._handleMouseMove = function(){ scope.handleMouseMove.apply(scope, arguments); };
