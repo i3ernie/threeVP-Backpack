@@ -1,7 +1,8 @@
 {
     "name": "threeVP-Backpack",
     "version": "0.0.2",
-
+    "author": "bernie",
+    "license": "MIT",
     "keywords": [
         "util",
         "functional",
@@ -9,13 +10,10 @@
         "client",
         "browser"
     ],
-
-    "license": "MIT",
     "repository": {
         "type": "git",
         "url": "git://github.com/i3ernie/threeVP-Backpack.js.git"
     },
-    "author": "bernie",
     "contributors": [
         "b.hessberger@gmail.com"
     ],
@@ -46,8 +44,13 @@
         "gulp": "latest",
         "gulp-load-plugins": "latest",
         "gulp-requirejs": "latest",
-        "gulp-uglify": "latest",
-        "lodash": "^4.17.10",
+        "gulp-uglify": "^3.0.1",
+        "lodash": "latest",
         "requirejs": "latest"
+    },
+    "scripts": {
+        "build": "gulp build",
+        "init": "gulp init",
+        "update": "npm update"
     }
 }

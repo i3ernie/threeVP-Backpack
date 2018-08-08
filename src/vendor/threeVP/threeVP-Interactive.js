@@ -113,7 +113,7 @@ define('utilities/IntersectPlane',["three", "lodash"], function ( THREE, _ ) {
         this.enabled = false;
         this.visible = false;
         
-        var side = this.options.opacity < .01 ? THREE.BackSide : THREE.FrontSide;
+        var side = /*this.options.opacity < .01 ? THREE.BackSide :*/ THREE.FrontSide;
 
         THREE.Mesh.call( this,
             new THREE.PlaneGeometry( this.options.width, this.options.height ),
