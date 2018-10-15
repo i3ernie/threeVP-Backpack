@@ -14,15 +14,16 @@ THREE.ColladaLoader.prototype = {
 
 	constructor: THREE.ColladaLoader,
 
-	crossOrigin: 'Anonymous',
+	crossOrigin: 'anonymous',
 
 	load: function ( url, onLoad, onProgress, onError ) {
 
 		var scope = this;
 
-		var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
+		var path = ( scope.path === undefined ) ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
 
 		var loader = new THREE.FileLoader( scope.manager );
+		loader.setPath( scope.path );
 		loader.load( url, function ( text ) {
 
 			onLoad( scope.parse( text, path ) );
@@ -34,6 +35,14 @@ THREE.ColladaLoader.prototype = {
 	setPath: function ( value ) {
 
 		this.path = value;
+		return this;
+
+	},
+
+	setResourcePath: function ( value ) {
+
+		this.resourcePath = value;
+		return this;
 
 	},
 
@@ -50,6 +59,7 @@ THREE.ColladaLoader.prototype = {
 	setCrossOrigin: function ( value ) {
 
 		this.crossOrigin = value;
+		return this;
 
 	},
 
@@ -966,7 +976,15 @@ THREE.ColladaLoader.prototype = {
 
 			// setup bind matrix
 
-			build.bindMatrix = new THREE.Matrix4().fromArray( data.bindShapeMatrix ).transpose();
+			if ( data.bindShapeMatrix ) {
+
+				build.bindMatrix = new THREE.Matrix4().fromArray( data.bindShapeMatrix ).transpose();
+
+			} else {
+
+				build.bindMatrix = new THREE.Matrix4().identity();
+
+			}
 
 			// process bones and inverse bind matrix data
 
@@ -1019,7 +1037,17 @@ THREE.ColladaLoader.prototype = {
 
 		function getImage( id ) {
 
-			return getBuild( library.images[ id ], buildImage );
+			var data = library.images[ id ];
+
+			if ( data !== undefined ) {
+
+				return getBuild( data, buildImage );
+
+			}
+
+			console.warn( 'THREE.ColladaLoader: Couldn\'t find image with ID:', id );
+
+			return null;
 
 		}
 
@@ -1430,6 +1458,28 @@ THREE.ColladaLoader.prototype = {
 
 		}
 
+		function getTextureLoader( image ) {
+
+			var loader;
+
+			var extension = image.slice( ( image.lastIndexOf( '.' ) - 1 >>> 0 ) + 2 ); // http://www.jstips.co/en/javascript/get-file-extension/
+			extension = extension.toLowerCase();
+
+			switch ( extension ) {
+
+				case 'tga':
+					loader = tgaLoader;
+					break;
+
+				default:
+					loader = textureLoader;
+
+			}
+
+			return loader;
+
+		}
+
 		function buildMaterial( data ) {
 
 			var effect = getEffect( data.url );
@@ -1460,7 +1510,7 @@ THREE.ColladaLoader.prototype = {
 			function getTexture( textureObject ) {
 
 				var sampler = effect.profile.samplers[ textureObject.id ];
-				var image;
+				var image = null;
 
 				// get image
 
@@ -1478,34 +1528,46 @@ THREE.ColladaLoader.prototype = {
 
 				// create texture if image is avaiable
 
-				if ( image !== undefined ) {
+				if ( image !== null ) {
 
-					var texture = textureLoader.load( image );
+					var loader = getTextureLoader( image );
 
-					var extra = textureObject.extra;
+					if ( loader !== undefined ) {
 
-					if ( extra !== undefined && extra.technique !== undefined && isEmpty( extra.technique ) === false ) {
+						var texture = loader.load( image );
 
-						var technique = extra.technique;
+						var extra = textureObject.extra;
 
-						texture.wrapS = technique.wrapU ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
-						texture.wrapT = technique.wrapV ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+						if ( extra !== undefined && extra.technique !== undefined && isEmpty( extra.technique ) === false ) {
 
-						texture.offset.set( technique.offsetU || 0, technique.offsetV || 0 );
-						texture.repeat.set( technique.repeatU || 1, technique.repeatV || 1 );
+							var technique = extra.technique;
+
+							texture.wrapS = technique.wrapU ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+							texture.wrapT = technique.wrapV ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+
+							texture.offset.set( technique.offsetU || 0, technique.offsetV || 0 );
+							texture.repeat.set( technique.repeatU || 1, technique.repeatV || 1 );
+
+						} else {
+
+							texture.wrapS = THREE.RepeatWrapping;
+							texture.wrapT = THREE.RepeatWrapping;
+
+						}
+
+						return texture;
 
 					} else {
 
-						texture.wrapS = THREE.RepeatWrapping;
-						texture.wrapT = THREE.RepeatWrapping;
+						console.warn( 'THREE.ColladaLoader: Loader for texture %s not found.', image );
+
+						return null;
 
 					}
 
-					return texture;
-
 				} else {
 
-					console.error( 'THREE.ColladaLoader: Unable to load texture with ID:', textureObject.id );
+					console.warn( 'THREE.ColladaLoader: Couldn\'t create texture with ID:', textureObject.id );
 
 					return null;
 
@@ -1530,12 +1592,11 @@ THREE.ColladaLoader.prototype = {
 						if ( parameter.texture ) material.specularMap = getTexture( parameter.texture );
 						break;
 					case 'shininess':
-						if ( parameter.float && material.shininess )
-							material.shininess = parameter.float;
+						if ( parameter.float && material.shininess ) material.shininess = parameter.float;
 						break;
 					case 'emission':
-						if ( parameter.color && material.emissive )
-							material.emissive.fromArray( parameter.color );
+						if ( parameter.color && material.emissive ) material.emissive.fromArray( parameter.color );
+						if ( parameter.texture ) material.emissiveMap = getTexture( parameter.texture );
 						break;
 
 				}
@@ -1575,7 +1636,8 @@ THREE.ColladaLoader.prototype = {
 
 				if ( transparent.data.texture ) {
 
-					material.alphaMap = getTexture( transparent.data.texture );
+					// we do not set an alpha map (see #13792)
+
 					material.transparent = true;
 
 				} else {
@@ -2173,29 +2235,56 @@ THREE.ColladaLoader.prototype = {
 
 			var materialKeys = [];
 
-			var start = 0, count = 0;
+			var start = 0;
 
 			for ( var p = 0; p < primitives.length; p ++ ) {
 
 				var primitive = primitives[ p ];
 				var inputs = primitive.inputs;
-				var triangleCount = 1;
-
-				if ( primitive.vcount && primitive.vcount[ 0 ] === 4 ) {
-
-					triangleCount = 2; // one quad -> two triangles
-
-				}
 
 				// groups
 
-				if ( primitive.type === 'lines' || primitive.type === 'linestrips' ) {
+				var count = 0;
 
-					count = primitive.count * 2;
+				switch ( primitive.type ) {
 
-				} else {
+					case 'lines':
+					case 'linestrips':
+						count = primitive.count * 2;
+						break;
 
-					count = primitive.count * 3 * triangleCount;
+					case 'triangles':
+						count = primitive.count * 3;
+						break;
+
+					case 'polylist':
+
+						for ( var g = 0; g < primitive.count; g ++ ) {
+
+							var vc = primitive.vcount[ g ];
+
+							switch ( vc ) {
+
+								case 3:
+									count += 3; // single triangle
+									break;
+
+								case 4:
+									count += 6; // quad, subdivided into two triangles
+									break;
+
+								default:
+									count += ( vc - 2 ) * 3; // polylist with more than four vertices
+									break;
+
+							}
+
+						}
+
+						break;
+
+					default:
+						console.warn( 'THREE.ColladaLoader: Unknow primitive type:', primitive.type );
 
 				}
 
@@ -2335,8 +2424,6 @@ THREE.ColladaLoader.prototype = {
 
 			}
 
-			var maxcount = 0;
-
 			var sourceArray = source.array;
 			var sourceStride = source.stride;
 
@@ -2366,19 +2453,21 @@ THREE.ColladaLoader.prototype = {
 
 						pushVector( a ); pushVector( b ); pushVector( c );
 
-					} else {
+					} else if ( count > 4 ) {
 
-						maxcount = Math.max( maxcount, count );
+						for ( var k = 1, kl = ( count - 2 ); k <= kl; k ++ ) {
+
+							var a = index + stride * 0;
+							var b = index + stride * k;
+							var c = index + stride * ( k + 1 );
+
+							pushVector( a ); pushVector( b ); pushVector( c );
+
+						}
 
 					}
 
 					index += stride * count;
-
-				}
-
-				if ( maxcount > 0 ) {
-
-					console.log( 'THREE.ColladaLoader: Geometry has faces with more than 4 vertices.' );
 
 				}
 
@@ -2649,6 +2738,82 @@ THREE.ColladaLoader.prototype = {
 			return data;
 
 		}
+
+		// physics
+
+		function parsePhysicsModel( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' ) || '',
+				rigidBodies: {}
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'rigid_body':
+						data.rigidBodies[ child.getAttribute( 'name' ) ] = {};
+						parsePhysicsRigidBody( child, data.rigidBodies[ child.getAttribute( 'name' ) ] );
+						break;
+
+				}
+
+			}
+
+			library.physicsModels[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parsePhysicsRigidBody( xml, data ) {
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'technique_common':
+						parsePhysicsTechniqueCommon( child, data );
+						break;
+
+				}
+
+			}
+
+		}
+
+		function parsePhysicsTechniqueCommon( xml, data ) {
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'inertia':
+						data.inertia = parseFloats( child.textContent );
+						break;
+
+					case 'mass':
+						data.mass = parseFloats( child.textContent )[0];
+						break;
+
+				}
+
+			}
+
+		}
+
+		// scene
 
 		function parseKinematicsScene( xml ) {
 
@@ -3061,7 +3226,15 @@ THREE.ColladaLoader.prototype = {
 
 			}
 
-			library.nodes[ data.id ] = data;
+			if ( hasNode( data.id ) ) {
+
+				console.warn( 'THREE.ColladaLoader: There is already a node with ID %s. Exclude current node from further processing.', data.id );
+
+			} else {
+
+				library.nodes[ data.id ] = data;
+
+			}
 
 			return data;
 
@@ -3246,7 +3419,7 @@ THREE.ColladaLoader.prototype = {
 						// and weights defined for it. But we still have to add the bone to the sorted bone list in order to
 						// ensure a correct animation of the model.
 
-						 boneInverse = new THREE.Matrix4();
+						boneInverse = new THREE.Matrix4();
 
 					}
 
@@ -3397,6 +3570,8 @@ THREE.ColladaLoader.prototype = {
 
 		}
 
+		var fallbackMaterial = new THREE.MeshBasicMaterial( { color: 0xff00ff } );
+
 		function resolveMaterialBinding( keys, instanceMaterials ) {
 
 			var materials = [];
@@ -3404,7 +3579,17 @@ THREE.ColladaLoader.prototype = {
 			for ( var i = 0, l = keys.length; i < l; i ++ ) {
 
 				var id = instanceMaterials[ keys[ i ] ];
-				materials.push( getMaterial( id ) );
+
+				if ( id === undefined ) {
+
+					console.warn( 'THREE.ColladaLoader: Material with key %s not found. Apply fallback material.', keys[ i ] );
+					materials.push( fallbackMaterial );
+
+				} else {
+
+					materials.push( getMaterial( id ) );
+
+				}
 
 			}
 
@@ -3608,19 +3793,13 @@ THREE.ColladaLoader.prototype = {
 
 		}
 
-		console.time( 'THREE.ColladaLoader' );
-
 		if ( text.length === 0 ) {
 
 			return { scene: new THREE.Scene() };
 
 		}
 
-		console.time( 'THREE.ColladaLoader: DOMParser' );
-
 		var xml = new DOMParser().parseFromString( text, 'application/xml' );
-
-		console.timeEnd( 'THREE.ColladaLoader: DOMParser' );
 
 		var collada = getElementsByTagName( xml, 'COLLADA' )[ 0 ];
 
@@ -3631,7 +3810,16 @@ THREE.ColladaLoader.prototype = {
 
 		var asset = parseAsset( getElementsByTagName( collada, 'asset' )[ 0 ] );
 		var textureLoader = new THREE.TextureLoader( this.manager );
-		textureLoader.setPath( path ).setCrossOrigin( this.crossOrigin );
+		textureLoader.setPath( this.resourcePath || path ).setCrossOrigin( this.crossOrigin );
+
+		var tgaLoader;
+
+		if ( THREE.TGALoader ) {
+
+			tgaLoader = new THREE.TGALoader( this.manager );
+			tgaLoader.setPath( this.resourcePath || path );
+
+		}
 
 		//
 
@@ -3654,10 +3842,9 @@ THREE.ColladaLoader.prototype = {
 			nodes: {},
 			visualScenes: {},
 			kinematicsModels: {},
+			physicsModels: {},
 			kinematicsScenes: {}
 		};
-
-		console.time( 'THREE.ColladaLoader: Parse' );
 
 		parseLibrary( collada, 'library_animations', 'animation', parseAnimation );
 		parseLibrary( collada, 'library_animation_clips', 'animation_clip', parseAnimationClip );
@@ -3671,11 +3858,8 @@ THREE.ColladaLoader.prototype = {
 		parseLibrary( collada, 'library_nodes', 'node', parseNode );
 		parseLibrary( collada, 'library_visual_scenes', 'visual_scene', parseVisualScene );
 		parseLibrary( collada, 'library_kinematics_models', 'kinematics_model', parseKinematicsModel );
+		parseLibrary( collada, 'library_physics_models', 'physics_model', parsePhysicsModel );
 		parseLibrary( collada, 'scene', 'instance_kinematics_scene', parseKinematicsScene );
-
-		console.timeEnd( 'THREE.ColladaLoader: Parse' );
-
-		console.time( 'THREE.ColladaLoader: Build' );
 
 		buildLibrary( library.animations, buildAnimation );
 		buildLibrary( library.clips, buildAnimationClip );
@@ -3687,8 +3871,6 @@ THREE.ColladaLoader.prototype = {
 		buildLibrary( library.lights, buildLight );
 		buildLibrary( library.geometries, buildGeometry );
 		buildLibrary( library.visualScenes, buildVisualScene );
-
-		console.timeEnd( 'THREE.ColladaLoader: Build' );
 
 		setupAnimations();
 		setupKinematics();
@@ -3702,8 +3884,6 @@ THREE.ColladaLoader.prototype = {
 		}
 
 		scene.scale.multiplyScalar( asset.unit );
-
-		console.timeEnd( 'THREE.ColladaLoader' );
 
 		return {
 			animations: animations,
@@ -3765,7 +3945,11 @@ define('LoaderSupport',["three"], function(THREE){
 
 
 
-if ( THREE.LoaderSupport === undefined ) { THREE.LoaderSupport = {} }
+if ( THREE.LoaderSupport === undefined ) {
+
+	THREE.LoaderSupport = {};
+
+}
 
 /**
  * Validation functions.
@@ -3804,6 +3988,7 @@ THREE.LoaderSupport.Callbacks = (function () {
 
 	function Callbacks() {
 		this.onProgress = null;
+		this.onReportError = null;
 		this.onMeshAlter = null;
 		this.onLoad = null;
 		this.onLoadMaterials = null;
@@ -3817,6 +4002,16 @@ THREE.LoaderSupport.Callbacks = (function () {
 	 */
 	Callbacks.prototype.setCallbackOnProgress = function ( callbackOnProgress ) {
 		this.onProgress = Validator.verifyInput( callbackOnProgress, this.onProgress );
+	};
+
+	/**
+	 * Register callback function that is invoked when an error is reported.
+	 * @memberOf THREE.LoaderSupport.Callbacks
+	 *
+	 * @param {callback} callbackOnReportError Callback function for described functionality
+	 */
+	Callbacks.prototype.setCallbackOnReportError = function ( callbackOnReportError ) {
+		this.onReportError = Validator.verifyInput( callbackOnReportError, this.onReportError );
 	};
 
 	/**
@@ -3926,11 +4121,12 @@ THREE.LoaderSupport.ResourceDescriptor = (function () {
 		} else {
 
 			this.path = Validator.verifyInput( urlParts.slice( 0, urlParts.length - 1).join( '/' ) + '/', null );
-			this.name = Validator.verifyInput( urlParts[ urlParts.length - 1 ], null );
+			this.name = urlParts[ urlParts.length - 1 ];
 			this.url = url;
 
 		}
-		this.extension = Validator.verifyInput( extension, "default" );
+		this.name = Validator.verifyInput( this.name, 'Unnamed_Resource' );
+		this.extension = Validator.verifyInput( extension, 'default' );
 		this.extension = this.extension.trim();
 		this.content = null;
 	}
@@ -4108,7 +4304,7 @@ THREE.LoaderSupport.PrepData = (function () {
  */
 THREE.LoaderSupport.MeshBuilder = (function () {
 
-	var LOADER_MESH_BUILDER_VERSION = '1.2.0';
+	var LOADER_MESH_BUILDER_VERSION = '1.2.2';
 
 	var Validator = THREE.LoaderSupport.Validator;
 
@@ -4192,6 +4388,7 @@ THREE.LoaderSupport.MeshBuilder = (function () {
 
 	MeshBuilder.prototype._setCallbacks = function ( callbacks ) {
 		if ( Validator.isValid( callbacks.onProgress ) ) this.callbacks.setCallbackOnProgress( callbacks.onProgress );
+		if ( Validator.isValid( callbacks.onReportError ) ) this.callbacks.setCallbackOnReportError( callbacks.onReportError );
 		if ( Validator.isValid( callbacks.onMeshAlter ) ) this.callbacks.setCallbackOnMeshAlter( callbacks.onMeshAlter );
 		if ( Validator.isValid( callbacks.onLoad ) ) this.callbacks.setCallbackOnLoad( callbacks.onLoad );
 		if ( Validator.isValid( callbacks.onLoadMaterials ) ) this.callbacks.setCallbackOnLoadMaterials( callbacks.onLoadMaterials );
@@ -4300,16 +4497,20 @@ THREE.LoaderSupport.MeshBuilder = (function () {
 			);
 			if ( Validator.isValid( callbackOnMeshAlterResult ) ) {
 
-				if ( ! callbackOnMeshAlterResult.isDisregardMesh() && callbackOnMeshAlterResult.providesAlteredMeshes() ) {
+				if ( callbackOnMeshAlterResult.isDisregardMesh() ) {
+
+					useOrgMesh = false;
+
+				} else if ( callbackOnMeshAlterResult.providesAlteredMeshes() ) {
 
 					for ( var i in callbackOnMeshAlterResult.meshes ) {
 
 						meshes.push( callbackOnMeshAlterResult.meshes[ i ] );
 
 					}
+					useOrgMesh = false;
 
 				}
-				useOrgMesh = false;
 
 			}
 
@@ -4561,7 +4762,7 @@ THREE.LoaderSupport.WorkerRunnerRefImpl = (function () {
  */
 THREE.LoaderSupport.WorkerSupport = (function () {
 
-	var WORKER_SUPPORT_VERSION = '2.2.0';
+	var WORKER_SUPPORT_VERSION = '2.2.1';
 
 	var Validator = THREE.LoaderSupport.Validator;
 
@@ -4686,7 +4887,7 @@ THREE.LoaderSupport.WorkerSupport = (function () {
 				payload.logging = {
 					enabled: true,
 					debug: false
-				}
+				};
 
 			}
 			this._postMessage();
@@ -4979,7 +5180,7 @@ THREE.LoaderSupport.WorkerSupport = (function () {
  */
 THREE.LoaderSupport.WorkerDirector = (function () {
 
-	var LOADER_WORKER_DIRECTOR_VERSION = '2.2.0';
+	var LOADER_WORKER_DIRECTOR_VERSION = '2.2.2';
 
 	var Validator = THREE.LoaderSupport.Validator;
 
@@ -5178,9 +5379,35 @@ THREE.LoaderSupport.WorkerDirector = (function () {
 			if ( Validator.isValid( prepDataCallbacks.onProgress ) ) prepDataCallbacks.onProgress( event );
 		};
 
-		var wrapperOnMeshAlter = function ( event ) {
-			if ( Validator.isValid( globalCallbacks.onMeshAlter ) ) globalCallbacks.onMeshAlter( event );
-			if ( Validator.isValid( prepDataCallbacks.onMeshAlter ) ) prepDataCallbacks.onMeshAlter( event );
+		var wrapperOnMeshAlter = function ( event, override ) {
+			if ( Validator.isValid( globalCallbacks.onMeshAlter ) ) override = globalCallbacks.onMeshAlter( event, override );
+			if ( Validator.isValid( prepDataCallbacks.onMeshAlter ) ) override = globalCallbacks.onMeshAlter( event, override );
+			return override;
+		};
+
+		var wrapperOnLoadMaterials = function ( materials ) {
+			if ( Validator.isValid( globalCallbacks.onLoadMaterials ) ) materials = globalCallbacks.onLoadMaterials( materials );
+			if ( Validator.isValid( prepDataCallbacks.onLoadMaterials ) ) materials = prepDataCallbacks.onLoadMaterials( materials );
+			return materials;
+		};
+
+		var wrapperOnReportError = function ( errorMessage ) {
+			var continueProcessing = true;
+			if ( Validator.isValid( globalCallbacks.onReportError ) ) continueProcessing = globalCallbacks.onReportError( supportDesc, errorMessage );
+			if ( Validator.isValid( prepDataCallbacks.onReportError ) )	continueProcessing = prepDataCallbacks.onReportError( supportDesc, errorMessage );
+
+			if ( ! Validator.isValid( globalCallbacks.onReportError ) && ! Validator.isValid( prepDataCallbacks.onReportError ) ) {
+
+				console.error( 'Loader reported an error: ' );
+				console.error( errorMessage );
+
+			}
+			if ( continueProcessing ) {
+
+				supportDesc.inUse = false;
+				scope.processQueue();
+
+			}
 		};
 
 		supportDesc.loader = this._buildLoader( supportDesc.instanceNo );
@@ -5188,7 +5415,9 @@ THREE.LoaderSupport.WorkerDirector = (function () {
 		var updatedCallbacks = new THREE.LoaderSupport.Callbacks();
 		updatedCallbacks.setCallbackOnLoad( wrapperOnLoad );
 		updatedCallbacks.setCallbackOnProgress( wrapperOnProgress );
+		updatedCallbacks.setCallbackOnReportError( wrapperOnReportError );
 		updatedCallbacks.setCallbackOnMeshAlter( wrapperOnMeshAlter );
+		updatedCallbacks.setCallbackOnLoadMaterials( wrapperOnLoadMaterials );
 		prepData.callbacks = updatedCallbacks;
 
 		supportDesc.loader.run( prepData, supportDesc.workerSupport );
@@ -5277,7 +5506,7 @@ if ( THREE.LoaderSupport === undefined ) console.error( '"THREE.LoaderSupport" i
  */
 THREE.OBJLoader2 = (function () {
 
-	var OBJLOADER2_VERSION = '2.4.0';
+	var OBJLOADER2_VERSION = '2.4.2';
 	var Validator = THREE.LoaderSupport.Validator;
 
 	function OBJLoader2( manager ) {
@@ -5295,6 +5524,7 @@ THREE.OBJLoader2 = (function () {
 		this.useIndices = false;
 		this.disregardNormals = false;
 		this.materialPerSmoothingGroup = false;
+		this.useOAsMesh = false;
 		this.loaderRootNode = new THREE.Group();
 
 		this.meshBuilder = new THREE.LoaderSupport.MeshBuilder();
@@ -5386,8 +5616,19 @@ THREE.OBJLoader2 = (function () {
 		this.materialPerSmoothingGroup = materialPerSmoothingGroup === true;
 	};
 
+	/**
+	 * Usually 'o' is meta-information and does not result in creation of new meshes, but mesh creation on occurrence of "o" can be enforced.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {boolean} useOAsMesh=false
+	 */
+	OBJLoader2.prototype.setUseOAsMesh = function ( useOAsMesh ) {
+		this.useOAsMesh = useOAsMesh === true;
+	};
+
 	OBJLoader2.prototype._setCallbacks = function ( callbacks ) {
 		if ( Validator.isValid( callbacks.onProgress ) ) this.callbacks.setCallbackOnProgress( callbacks.onProgress );
+		if ( Validator.isValid( callbacks.onReportError ) ) this.callbacks.setCallbackOnReportError( callbacks.onReportError );
 		if ( Validator.isValid( callbacks.onMeshAlter ) ) this.callbacks.setCallbackOnMeshAlter( callbacks.onMeshAlter );
 		if ( Validator.isValid( callbacks.onLoad ) ) this.callbacks.setCallbackOnLoad( callbacks.onLoad );
 		if ( Validator.isValid( callbacks.onLoadMaterials ) ) this.callbacks.setCallbackOnLoadMaterials( callbacks.onLoadMaterials );
@@ -5430,7 +5671,19 @@ THREE.OBJLoader2 = (function () {
 
 		}
 		this.onProgress( 'error', output, -1 );
-		throw output;
+		this._throwError( output );
+	};
+
+	OBJLoader2.prototype._throwError = function ( errorMessage ) {
+		if ( Validator.isValid( this.callbacks.onReportError ) )  {
+
+			this.callbacks.onReportError( errorMessage );
+
+		} else {
+
+			throw errorMessage;
+
+		}
 	};
 
 	/**
@@ -5450,11 +5703,15 @@ THREE.OBJLoader2 = (function () {
 	};
 
 	OBJLoader2.prototype._loadObj = function ( resource, onLoad, onProgress, onError, onMeshAlter, useAsync ) {
-		if ( ! Validator.isValid( onError ) ) onError = this._onError;
+		var scope = this;
+		if ( ! Validator.isValid( onError ) ) {
+			onError = function ( event ) {
+				scope._onError( event );
+			};
+		}
 
 		// fast-fail
 		if ( ! Validator.isValid( resource ) ) onError( 'An invalid ResourceDescriptor was provided. Unable to continue!' );
-		var scope = this;
 		var fileLoaderOnLoad = function ( content ) {
 
 			resource.content = content;
@@ -5544,7 +5801,7 @@ THREE.OBJLoader2 = (function () {
 			scope._loadObj( available.obj, scope.callbacks.onLoad, null, null, scope.callbacks.onMeshAlter, prepData.useAsync );
 
 		};
-		this._loadMtl( available.mtl, onMaterialsLoaded, prepData.crossOrigin, prepData.materialOptions );
+		this._loadMtl( available.mtl, onMaterialsLoaded, null, null, prepData.crossOrigin, prepData.materialOptions );
 	};
 
 	OBJLoader2.prototype._applyPrepData = function ( prepData ) {
@@ -5557,6 +5814,7 @@ THREE.OBJLoader2 = (function () {
 			this.setUseIndices( prepData.useIndices );
 			this.setDisregardNormals( prepData.disregardNormals );
 			this.setMaterialPerSmoothingGroup( prepData.materialPerSmoothingGroup );
+			this.setUseOAsMesh( prepData.useOAsMesh );
 
 			this._setCallbacks( prepData.getCallbacks() );
 
@@ -5583,6 +5841,7 @@ THREE.OBJLoader2 = (function () {
 		var parser = new Parser();
 		parser.setLogging( this.logging.enabled, this.logging.debug );
 		parser.setMaterialPerSmoothingGroup( this.materialPerSmoothingGroup );
+		parser.setUseOAsMesh( this.useOAsMesh );
 		parser.setUseIndices( this.useIndices );
 		parser.setDisregardNormals( this.disregardNormals );
 		// sync code works directly on the material references
@@ -5615,7 +5874,7 @@ THREE.OBJLoader2 = (function () {
 
 		} else {
 
-			throw 'Provided content was neither of type String nor Uint8Array! Aborting...';
+			this._throwError( 'Provided content was neither of type String nor Uint8Array! Aborting...' );
 
 		}
 		if ( this.logging.enabled ) console.timeEnd( 'OBJLoader2 parse: ' + this.modelName );
@@ -5649,7 +5908,7 @@ THREE.OBJLoader2 = (function () {
 		if ( ! Validator.isValid( content ) ) {
 
 			console.warn( 'Provided content is not a valid ArrayBuffer.' );
-			scopedOnLoad()
+			scopedOnLoad();
 
 		} else {
 
@@ -5694,6 +5953,7 @@ THREE.OBJLoader2 = (function () {
 				params: {
 					useAsync: true,
 					materialPerSmoothingGroup: this.materialPerSmoothingGroup,
+					useOAsMesh: this.useOAsMesh,
 					useIndices: this.useIndices,
 					disregardNormals: this.disregardNormals
 				},
@@ -5729,6 +5989,7 @@ THREE.OBJLoader2 = (function () {
 			this.materials = {};
 			this.useAsync = false;
 			this.materialPerSmoothingGroup = false;
+			this.useOAsMesh = false;
 			this.useIndices = false;
 			this.disregardNormals = false;
 
@@ -5801,6 +6062,10 @@ THREE.OBJLoader2 = (function () {
 			this.materialPerSmoothingGroup = materialPerSmoothingGroup;
 		};
 
+		Parser.prototype.setUseOAsMesh = function ( useOAsMesh ) {
+			this.useOAsMesh = useOAsMesh;
+		};
+
 		Parser.prototype.setUseIndices = function ( useIndices ) {
 			this.useIndices = useIndices;
 		};
@@ -5815,7 +6080,11 @@ THREE.OBJLoader2 = (function () {
 		};
 
 		Parser.prototype.setCallbackMeshBuilder = function ( callbackMeshBuilder ) {
-			if ( ! THREE.LoaderSupport.Validator.isValid( callbackMeshBuilder ) ) throw 'Unable to run as no "MeshBuilder" callback is set.';
+			if ( ! THREE.LoaderSupport.Validator.isValid( callbackMeshBuilder ) ) {
+
+				this._throwError( 'Unable to run as no "MeshBuilder" callback is set.' );
+
+			}
 			this.callbackMeshBuilder = callbackMeshBuilder;
 		};
 
@@ -5839,6 +6108,7 @@ THREE.OBJLoader2 = (function () {
 					+ matNames
 					+ '\n\tuseAsync: ' + this.useAsync
 					+ '\n\tmaterialPerSmoothingGroup: ' + this.materialPerSmoothingGroup
+					+ '\n\tuseOAsMesh: ' + this.useOAsMesh
 					+ '\n\tuseIndices: ' + this.useIndices
 					+ '\n\tdisregardNormals: ' + this.disregardNormals
 					+ '\n\tcallbackMeshBuilderName: ' + this.callbackMeshBuilder.name
@@ -6086,7 +6356,8 @@ THREE.OBJLoader2 = (function () {
 					break;
 
 				case 'o':
-					// 'o' is pure meta-information and does not result in creation of new meshes
+					// 'o' is meta-information and usually does not result in creation of new meshes, but can be enforced with "useOAsMesh"
+					if ( this.useOAsMesh ) this.processCompletedMesh();
 					this.rawMesh.objectName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 2, this.globalCounts.currentByte );
 					break;
 
@@ -6186,7 +6457,7 @@ THREE.OBJLoader2 = (function () {
 				vertices.push( scope.vertices[ indexPointerV++ ] );
 				vertices.push( scope.vertices[ indexPointerV ] );
 
-				var indexPointerC = scope.colors.length > 0 ? indexPointerV : null;
+				var indexPointerC = scope.colors.length > 0 ? indexPointerV + 1 : null;
 				if ( indexPointerC !== null ) {
 
 					var colors = scope.rawMesh.subGroupInUse.colors;
@@ -6316,7 +6587,7 @@ THREE.OBJLoader2 = (function () {
 
 				if ( this.colors.length > 0 && this.colors.length !== this.vertices.length ) {
 
-					throw 'Vertex Colors were detected, but vertex count and color count do not match!';
+					this._throwError( 'Vertex Colors were detected, but vertex count and color count do not match!' );
 
 				}
 				if ( this.logging.enabled && this.logging.debug ) console.debug( this.createRawMeshReport( this.inputObjectCount ) );
@@ -6566,18 +6837,20 @@ THREE.OBJLoader2 = (function () {
 	 *
 	 * @param {string} url URL to the file
 	 * @param {Object} content The file content as arraybuffer or text
-	 * @param {function} callbackOnLoad Callback to be called after successful load
+	 * @param {function} onLoad Callback to be called after successful load
+	 * @param {callback} [onProgress] A function to be called while the loading is in progress. The argument will be the XMLHttpRequest instance, which contains total and Integer bytes.
+	 * @param {callback} [onError] A function to be called if an error occurs during loading. The function receives the error as an argument.
 	 * @param {string} [crossOrigin] CORS value
  	 * @param {Object} [materialOptions] Set material loading options for MTLLoader
 	 */
-	OBJLoader2.prototype.loadMtl = function ( url, content, callbackOnLoad, crossOrigin, materialOptions ) {
+	OBJLoader2.prototype.loadMtl = function ( url, content, onLoad, onProgress, onError, crossOrigin, materialOptions ) {
 		var resource = new THREE.LoaderSupport.ResourceDescriptor( url, 'MTL' );
 		resource.setContent( content );
-		this._loadMtl( resource, callbackOnLoad, crossOrigin, materialOptions );
+		this._loadMtl( resource, onLoad, onProgress, onError, crossOrigin, materialOptions );
 	};
 
 
-	OBJLoader2.prototype._loadMtl = function ( resource, callbackOnLoad, crossOrigin, materialOptions ) {
+	OBJLoader2.prototype._loadMtl = function ( resource, onLoad, onProgress, onError, crossOrigin, materialOptions ) {
 		if ( THREE.MTLLoader === undefined ) console.error( '"THREE.MTLLoader" is not available. "THREE.OBJLoader2" requires it for loading MTL files.' );
 		if ( Validator.isValid( resource ) && this.logging.enabled ) console.time( 'Loading MTL: ' + resource.name );
 
@@ -6600,7 +6873,7 @@ THREE.OBJLoader2 = (function () {
 			}
 
 			if ( Validator.isValid( resource ) && scope.logging.enabled ) console.timeEnd( 'Loading MTL: ' + resource.name );
-			callbackOnLoad( materials, materialCreator );
+			onLoad( materials, materialCreator );
 		};
 
 		// fast-fail
@@ -6613,22 +6886,56 @@ THREE.OBJLoader2 = (function () {
 			var mtlLoader = new THREE.MTLLoader( this.manager );
 			crossOrigin = Validator.verifyInput( crossOrigin, 'anonymous' );
 			mtlLoader.setCrossOrigin( crossOrigin );
-			mtlLoader.setPath( resource.path );
+			mtlLoader.setResourcePath( resource.path );
 			if ( Validator.isValid( materialOptions ) ) mtlLoader.setMaterialOptions( materialOptions );
+
+			var parseTextWithMtlLoader = function ( content ) {
+				var contentAsText = content;
+				if ( typeof( content ) !== 'string' && ! ( content instanceof String ) ) {
+
+					if ( content.length > 0 || content.byteLength > 0 ) {
+
+						contentAsText = THREE.LoaderUtils.decodeText( content );
+
+					} else {
+
+						this._throwError( 'Unable to parse mtl as it it seems to be neither a String, an Array or an ArrayBuffer!' );
+					}
+
+				}
+				processMaterials( mtlLoader.parse( contentAsText ) );
+			};
 
 			if ( Validator.isValid( resource.content ) ) {
 
-				processMaterials( Validator.isValid( resource.content ) ? mtlLoader.parse( resource.content ) : null );
+				parseTextWithMtlLoader( resource.content );
 
 			} else if ( Validator.isValid( resource.url ) ) {
 
 				var fileLoader = new THREE.FileLoader( this.manager );
-				fileLoader.load( resource.url, function ( text ) {
+				if ( ! Validator.isValid( onError ) ) {
+					onError = function ( event ) {
+						scope._onError( event );
+					};
+				}
+				if ( ! Validator.isValid( onProgress ) ) {
+					var numericalValueRef = 0;
+					var numericalValue = 0;
+					onProgress = function ( event ) {
+						if ( ! event.lengthComputable ) return;
 
-					resource.content = text;
-					processMaterials( mtlLoader.parse( text ) );
+						numericalValue = event.loaded / event.total;
+						if ( numericalValue > numericalValueRef ) {
 
-				}, this._onProgress, this._onError );
+							numericalValueRef = numericalValue;
+							var output = 'Download of "' + resource.url + '": ' + ( numericalValue * 100 ).toFixed( 2 ) + '%';
+							scope.onProgress( 'progressLoad', output, numericalValue );
+
+						}
+					};
+				}
+
+				fileLoader.load( resource.url, parseTextWithMtlLoader, onProgress, onError );
 
 			}
 		}
@@ -6700,20 +7007,22 @@ THREE.MTLLoader.prototype = {
 	 * @param {Function} [onProgress] - Callback for download progress.
 	 * @param {Function} [onError] - Callback for download errors.
 	 *
-	 * @see setPath setTexturePath
+	 * @see setPath setResourcePath
 	 *
 	 * @note In order for relative texture references to resolve correctly
-	 * you must call setPath and/or setTexturePath explicitly prior to load.
+	 * you must call setResourcePath() explicitly prior to load.
 	 */
 	load: function ( url, onLoad, onProgress, onError ) {
 
 		var scope = this;
 
+		var path = ( this.path === undefined ) ? THREE.LoaderUtils.extractUrlBase( url ) : this.path;
+
 		var loader = new THREE.FileLoader( this.manager );
 		loader.setPath( this.path );
 		loader.load( url, function ( text ) {
 
-			onLoad( scope.parse( text ) );
+			onLoad( scope.parse( text, path ) );
 
 		}, onProgress, onError );
 
@@ -6723,8 +7032,9 @@ THREE.MTLLoader.prototype = {
 	 * Set base path for resolving references.
 	 * If set this path will be prepended to each loaded and found reference.
 	 *
-	 * @see setTexturePath
+	 * @see setResourcePath
 	 * @param {String} path
+	 * @return {THREE.MTLLoader}
 	 *
 	 * @example
 	 *     mtlLoader.setPath( 'assets/obj/' );
@@ -6733,45 +7043,47 @@ THREE.MTLLoader.prototype = {
 	setPath: function ( path ) {
 
 		this.path = path;
+		return this;
 
 	},
 
 	/**
-	 * Set base path for resolving texture references.
-	 * If set this path will be prepended found texture reference.
-	 * If not set and setPath is, it will be used as texture base path.
+	 * Set base path for additional resources like textures.
 	 *
 	 * @see setPath
 	 * @param {String} path
+	 * @return {THREE.MTLLoader}
 	 *
 	 * @example
 	 *     mtlLoader.setPath( 'assets/obj/' );
-	 *     mtlLoader.setTexturePath( 'assets/textures/' );
+	 *     mtlLoader.setResourcePath( 'assets/textures/' );
 	 *     mtlLoader.load( 'my.mtl', ... );
 	 */
-	setTexturePath: function ( path ) {
+	setResourcePath: function ( path ) {
 
-		this.texturePath = path;
+		this.resourcePath = path;
+		return this;
 
 	},
 
-	setBaseUrl: function ( path ) {
+	setTexturePath: function ( path ) {
 
-		console.warn( 'THREE.MTLLoader: .setBaseUrl() is deprecated. Use .setTexturePath( path ) for texture path or .setPath( path ) for general base path instead.' );
-
-		this.setTexturePath( path );
+		console.warn( 'THREE.MTLLoader: .setTexturePath() has been renamed to .setResourcePath().' );
+		return this.setResourcePath( path );
 
 	},
 
 	setCrossOrigin: function ( value ) {
 
 		this.crossOrigin = value;
+		return this;
 
 	},
 
 	setMaterialOptions: function ( value ) {
 
 		this.materialOptions = value;
+		return this;
 
 	},
 
@@ -6781,12 +7093,12 @@ THREE.MTLLoader.prototype = {
 	 * @param {String} text - Content of MTL file
 	 * @return {THREE.MTLLoader.MaterialCreator}
 	 *
-	 * @see setPath setTexturePath
+	 * @see setPath setResourcePath
 	 *
 	 * @note In order for relative texture references to resolve correctly
-	 * you must call setPath and/or setTexturePath explicitly prior to parse.
+	 * you must call setResourcePath() explicitly prior to parse.
 	 */
-	parse: function ( text ) {
+	parse: function ( text, path ) {
 
 		var lines = text.split( '\n' );
 		var info = {};
@@ -6820,7 +7132,7 @@ THREE.MTLLoader.prototype = {
 				info = { name: value };
 				materialsInfo[ value ] = info;
 
-			} else if ( info ) {
+			} else {
 
 				if ( key === 'ka' || key === 'kd' || key === 'ks' ) {
 
@@ -6837,7 +7149,7 @@ THREE.MTLLoader.prototype = {
 
 		}
 
-		var materialCreator = new THREE.MTLLoader.MaterialCreator( this.texturePath || this.path, this.materialOptions );
+		var materialCreator = new THREE.MTLLoader.MaterialCreator( this.resourcePath || path, this.materialOptions );
 		materialCreator.setCrossOrigin( this.crossOrigin );
 		materialCreator.setManager( this.manager );
 		materialCreator.setMaterials( materialsInfo );
@@ -6880,11 +7192,12 @@ THREE.MTLLoader.MaterialCreator.prototype = {
 
 	constructor: THREE.MTLLoader.MaterialCreator,
 
-	crossOrigin: 'Anonymous',
+	crossOrigin: 'anonymous',
 
 	setCrossOrigin: function ( value ) {
 
 		this.crossOrigin = value;
+		return this;
 
 	},
 
@@ -7116,6 +7429,15 @@ THREE.MTLLoader.MaterialCreator.prototype = {
 
 					break;
 
+				case 'map_d':
+
+					// Alpha map
+
+					setMapForType( "alphaMap", value );
+					params.transparent = true;
+
+					break;
+
 				case 'ns':
 
 					// The specular exponent (defines the focus of the specular highlight)
@@ -7142,9 +7464,9 @@ THREE.MTLLoader.MaterialCreator.prototype = {
 
 					if ( this.options && this.options.invertTrProperty ) n = 1 - n;
 
-					if ( n < 1 ) {
+					if ( n > 0 ) {
 
-						params.opacity = n;
+						params.opacity = 1 - n;
 						params.transparent = true;
 
 					}
@@ -7316,6 +7638,7 @@ THREE.STLLoader.prototype = {
 		var scope = this;
 
 		var loader = new THREE.FileLoader( scope.manager );
+		loader.setPath( scope.path );
 		loader.setResponseType( 'arraybuffer' );
 		loader.load( url, function ( text ) {
 
@@ -7334,6 +7657,13 @@ THREE.STLLoader.prototype = {
 			}
 
 		}, onProgress, onError );
+
+	},
+
+	setPath: function ( value ) {
+
+		this.path = value;
+		return this;
 
 	},
 
@@ -7357,22 +7687,39 @@ THREE.STLLoader.prototype = {
 			// However, ASCII STLs lacking the SPACE after the 'd' are known to be
 			// plentiful.  So, check the first 5 bytes for 'solid'.
 
+			// Several encodings, such as UTF-8, precede the text with up to 5 bytes:
+			// https://en.wikipedia.org/wiki/Byte_order_mark#Byte_order_marks_by_encoding
+			// Search for "solid" to start anywhere after those prefixes.
+
 			// US-ASCII ordinal values for 's', 'o', 'l', 'i', 'd'
 
 			var solid = [ 115, 111, 108, 105, 100 ];
 
-			for ( var i = 0; i < 5; i ++ ) {
+			for ( var off = 0; off < 5; off ++ ) {
 
-				// If solid[ i ] does not match the i-th byte, then it is not an
-				// ASCII STL; hence, it is binary and return true.
+				// If "solid" text is matched to the current offset, declare it to be an ASCII STL.
 
-				if ( solid[ i ] != reader.getUint8( i, false ) ) return true;
+				if ( matchDataViewAt ( solid, reader, off ) ) return false;
 
- 			}
+			}
 
-			// First 5 bytes read "solid"; declare it to be an ASCII STL
+			// Couldn't find "solid" text at the beginning; it is binary STL.
 
-			return false;
+			return true;
+
+		}
+
+		function matchDataViewAt( query, reader, offset ) {
+
+			// Check if each byte in query matches the corresponding byte from the current offset
+
+			for ( var i = 0, il = query.length; i < il; i ++ ) {
+
+				if ( query[ i ] !== reader.getUint8( offset + i, false ) ) return false;
+
+			}
+
+			return true;
 
 		}
 
@@ -7483,7 +7830,7 @@ THREE.STLLoader.prototype = {
 			var patternFace = /facet([\s\S]*?)endfacet/g;
 			var faceCounter = 0;
 
-			var patternFloat = /[\s]+([+-]?(?:\d+.\d+|\d+.|\d+|.\d+)(?:[eE][+-]?\d+)?)/.source;
+			var patternFloat = /[\s]+([+-]?(?:\d*)(?:\.\d*)?(?:[eE][+-]?\d+)?)/.source;
 			var patternVertex = new RegExp( 'vertex' + patternFloat + patternFloat + patternFloat, 'g' );
 			var patternNormal = new RegExp( 'normal' + patternFloat + patternFloat + patternFloat, 'g' );
 

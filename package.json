@@ -36,17 +36,15 @@
         "threeVP": "git://github.com/i3ernie/threeVP.js.git",
         "threeVP-Animation": "git://github.com/i3ernie/threeVP-Animation.js.git",
         "threeVP-Extras": "git://github.com/i3ernie/threeVP-Extras.js.git",
-        "threeVP-Interactive": "git://github.com/i3ernie/threeVP-Interactive.js.git",
-        "threeVP-Loader": "git://github.com/i3ernie/threeVP-Loader.js.git",
         "threeVP-MaterialFactory": "git://github.com/i3ernie/threeVP-MaterialFactory.js.git"
     },
     "devDependencies": {
         "gulp": "latest",
         "gulp-load-plugins": "latest",
-        "gulp-requirejs": "latest",
+        "gulp-requirejs": "^1.2.0",
         "gulp-uglify": "^3.0.1",
-        "lodash": "latest",
-        "requirejs": "latest"
+        "lodash": "^4.17.11",
+        "requirejs": "^2.3.6"
     },
     "scripts": {
         "build": "gulp build",

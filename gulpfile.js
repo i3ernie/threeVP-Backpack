@@ -58,7 +58,7 @@ gulp.task( 'build', function ( done ) {
             })
         ).on('error', console.log)
     .pipe( gulp.dest( dirs.dist ) );
-    /*
+    
     plugins.requirejs(
         _.extend({}, requireconfig,
             {
@@ -70,5 +70,5 @@ gulp.task( 'build', function ( done ) {
         ).on('error', console.log)
     .pipe( plugins.uglify() )
     .pipe( gulp.dest( dirs.dist ) );
-    */
+    
 });
