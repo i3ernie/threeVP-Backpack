@@ -16,8 +16,6 @@
         "image"     : "vendor/require/image",
         
         "core"                  : "vendor/threeVP/core",
-        "threeVP-Loaders"       : "vendor/threeVP/threeVP-Loaders",
-        "threeVP-Interactive"   : "vendor/threeVP/threeVP-Interactive",
         "threeVP-Extras"        : "vendor/threeVP/threeVP-Extras",
         "threeVP-Animation"     : "vendor/threeVP/threeVP-Animation",
         "Viewport"              : "vendor/threeVP/Viewport"
