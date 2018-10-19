@@ -19767,7 +19767,7 @@ define('less',['require'], function(require) {
     window.less = config.less || {};
     window.less.env = 'development';
 
-    require(['./lessc', './normalize'], function(lessc, normalize) {
+    require(['lessc', 'normalize'], function(lessc, normalize) {
 
       var fileUrl = req.toUrl(lessId + '.less');
       fileUrl = normalize.absoluteURI(fileUrl, pagePath);
@@ -19787,6 +19787,8067 @@ define('less',['require'], function(require) {
   }
   
   return lessAPI;
+});
+
+/*! 
+ * LESS - Leaner CSS v1.7.0 
+ * http://lesscss.org 
+ * 
+ * Copyright (c) 2009-2014, Alexis Sellier <self@cloudhead.net> 
+ * Licensed under the Apache v2 License. 
+ * 
+ */ 
+
+ /** * @license Apache v2
+ */ 
+
+
+
+(function (window, undefined) {//
+// Stub out `require` in the browser
+//
+function require(arg) {
+    return window.less[arg.split('/')[1]];
+};
+
+
+if (typeof(window.less) === 'undefined' || typeof(window.less.nodeType) !== 'undefined') { window.less = {}; }
+less = window.less;
+tree = window.less.tree = {};
+less.mode = 'browser';
+
+var less, tree;
+
+// Node.js does not have a header file added which defines less
+if (less === undefined) {
+    less = exports;
+    tree = require('./tree');
+    less.mode = 'node';
+}
+//
+// less.js - parser
+//
+//    A relatively straight-forward predictive parser.
+//    There is no tokenization/lexing stage, the input is parsed
+//    in one sweep.
+//
+//    To make the parser fast enough to run in the browser, several
+//    optimization had to be made:
+//
+//    - Matching and slicing on a huge input is often cause of slowdowns.
+//      The solution is to chunkify the input into smaller strings.
+//      The chunks are stored in the `chunks` var,
+//      `j` holds the current chunk index, and `currentPos` holds
+//      the index of the current chunk in relation to `input`.
+//      This gives us an almost 4x speed-up.
+//
+//    - In many cases, we don't need to match individual tokens;
+//      for example, if a value doesn't hold any variables, operations
+//      or dynamic references, the parser can effectively 'skip' it,
+//      treating it as a literal.
+//      An example would be '1px solid #000' - which evaluates to itself,
+//      we don't need to know what the individual components are.
+//      The drawback, of course is that you don't get the benefits of
+//      syntax-checking on the CSS. This gives us a 50% speed-up in the parser,
+//      and a smaller speed-up in the code-gen.
+//
+//
+//    Token matching is done with the `$` function, which either takes
+//    a terminal string or regexp, or a non-terminal function to call.
+//    It also takes care of moving all the indices forwards.
+//
+//
+less.Parser = function Parser(env) {
+    var input,       // LeSS input string
+        i,           // current index in `input`
+        j,           // current chunk
+        saveStack = [],   // holds state for backtracking
+        furthest,    // furthest index the parser has gone to
+        chunks,      // chunkified input
+        current,     // current chunk
+        currentPos,  // index of current chunk, in `input`
+        parser,
+        parsers,
+        rootFilename = env && env.filename;
+
+    // Top parser on an import tree must be sure there is one "env"
+    // which will then be passed around by reference.
+    if (!(env instanceof tree.parseEnv)) {
+        env = new tree.parseEnv(env);
+    }
+
+    var imports = this.imports = {
+        paths: env.paths || [],  // Search paths, when importing
+        queue: [],               // Files which haven't been imported yet
+        files: env.files,        // Holds the imported parse trees
+        contents: env.contents,  // Holds the imported file contents
+        contentsIgnoredChars: env.contentsIgnoredChars, // lines inserted, not in the original less
+        mime:  env.mime,         // MIME type of .less files
+        error: null,             // Error in parsing/evaluating an import
+        push: function (path, currentFileInfo, importOptions, callback) {
+            var parserImports = this;
+            this.queue.push(path);
+
+            var fileParsedFunc = function (e, root, fullPath) {
+                parserImports.queue.splice(parserImports.queue.indexOf(path), 1); // Remove the path from the queue
+
+                var importedPreviously = fullPath === rootFilename;
+
+                parserImports.files[fullPath] = root;                        // Store the root
+
+                if (e && !parserImports.error) { parserImports.error = e; }
+
+                callback(e, root, importedPreviously, fullPath);
+            };
+
+            if (less.Parser.importer) {
+                less.Parser.importer(path, currentFileInfo, fileParsedFunc, env);
+            } else {
+                less.Parser.fileLoader(path, currentFileInfo, function(e, contents, fullPath, newFileInfo) {
+                    if (e) {fileParsedFunc(e); return;}
+
+                    var newEnv = new tree.parseEnv(env);
+
+                    newEnv.currentFileInfo = newFileInfo;
+                    newEnv.processImports = false;
+                    newEnv.contents[fullPath] = contents;
+
+                    if (currentFileInfo.reference || importOptions.reference) {
+                        newFileInfo.reference = true;
+                    }
+
+                    if (importOptions.inline) {
+                        fileParsedFunc(null, contents, fullPath);
+                    } else {
+                        new(less.Parser)(newEnv).parse(contents, function (e, root) {
+                            fileParsedFunc(e, root, fullPath);
+                        });
+                    }
+                }, env);
+            }
+        }
+    };
+
+    function save()    { currentPos = i; saveStack.push( { current: current, i: i, j: j }); }
+    function restore() { var state = saveStack.pop(); current = state.current; currentPos = i = state.i; j = state.j; }
+    function forget() { saveStack.pop(); }
+
+    function sync() {
+        if (i > currentPos) {
+            current = current.slice(i - currentPos);
+            currentPos = i;
+        }
+    }
+    function isWhitespace(str, pos) {
+        var code = str.charCodeAt(pos | 0);
+        return (code <= 32) && (code === 32 || code === 10 || code === 9);
+    }
+    //
+    // Parse from a token, regexp or string, and move forward if match
+    //
+    function $(tok) {
+        var tokType = typeof tok,
+            match, length;
+
+        // Either match a single character in the input,
+        // or match a regexp in the current chunk (`current`).
+        //
+        if (tokType === "string") {
+            if (input.charAt(i) !== tok) {
+                return null;
+            }
+            skipWhitespace(1);
+            return tok;
+        }
+
+        // regexp
+        sync ();
+        if (! (match = tok.exec(current))) {
+            return null;
+        }
+
+        length = match[0].length;
+
+        // The match is confirmed, add the match length to `i`,
+        // and consume any extra white-space characters (' ' || '\n')
+        // which come after that. The reason for this is that LeSS's
+        // grammar is mostly white-space insensitive.
+        //
+        skipWhitespace(length);
+
+        if(typeof(match) === 'string') {
+            return match;
+        } else {
+            return match.length === 1 ? match[0] : match;
+        }
+    }
+
+    // Specialization of $(tok)
+    function $re(tok) {
+        if (i > currentPos) {
+            current = current.slice(i - currentPos);
+            currentPos = i;
+        }
+        var m = tok.exec(current);
+        if (!m) {
+            return null;
+        }
+
+        skipWhitespace(m[0].length);
+        if(typeof m === "string") {
+            return m;
+        }
+
+        return m.length === 1 ? m[0] : m;
+    }
+
+    var _$re = $re;
+
+    // Specialization of $(tok)
+    function $char(tok) {
+        if (input.charAt(i) !== tok) {
+            return null;
+        }
+        skipWhitespace(1);
+        return tok;
+    }
+
+    function skipWhitespace(length) {
+        var oldi = i, oldj = j,
+            curr = i - currentPos,
+            endIndex = i + current.length - curr,
+            mem = (i += length),
+            inp = input,
+            c;
+
+        for (; i < endIndex; i++) {
+            c = inp.charCodeAt(i);
+            if (c > 32) {
+                break;
+            }
+
+            if ((c !== 32) && (c !== 10) && (c !== 9) && (c !== 13)) {
+                break;
+            }
+         }
+
+        current = current.slice(length + i - mem + curr);
+        currentPos = i;
+
+        if (!current.length && (j < chunks.length - 1)) {
+            current = chunks[++j];
+            skipWhitespace(0); // skip space at the beginning of a chunk
+            return true; // things changed
+        }
+
+        return oldi !== i || oldj !== j;
+    }
+
+    function expect(arg, msg) {
+        // some older browsers return typeof 'function' for RegExp
+        var result = (Object.prototype.toString.call(arg) === '[object Function]') ? arg.call(parsers) : $(arg);
+        if (result) {
+            return result;
+        }
+        error(msg || (typeof(arg) === 'string' ? "expected '" + arg + "' got '" + input.charAt(i) + "'"
+                                               : "unexpected token"));
+    }
+
+    // Specialization of expect()
+    function expectChar(arg, msg) {
+        if (input.charAt(i) === arg) {
+            skipWhitespace(1);
+            return arg;
+        }
+        error(msg || "expected '" + arg + "' got '" + input.charAt(i) + "'");
+    }
+
+    function error(msg, type) {
+        var e = new Error(msg);
+        e.index = i;
+        e.type = type || 'Syntax';
+        throw e;
+    }
+
+    // Same as $(), but don't change the state of the parser,
+    // just return the match.
+    function peek(tok) {
+        if (typeof(tok) === 'string') {
+            return input.charAt(i) === tok;
+        } else {
+            return tok.test(current);
+        }
+    }
+
+    // Specialization of peek()
+    function peekChar(tok) {
+        return input.charAt(i) === tok;
+    }
+
+
+    function getInput(e, env) {
+        if (e.filename && env.currentFileInfo.filename && (e.filename !== env.currentFileInfo.filename)) {
+            return parser.imports.contents[e.filename];
+        } else {
+            return input;
+        }
+    }
+
+    function getLocation(index, inputStream) {
+        var n = index + 1,
+            line = null,
+            column = -1;
+
+        while (--n >= 0 && inputStream.charAt(n) !== '\n') {
+            column++;
+        }
+
+        if (typeof index === 'number') {
+            line = (inputStream.slice(0, index).match(/\n/g) || "").length;
+        }
+
+        return {
+            line: line,
+            column: column
+        };
+    }
+
+    function getDebugInfo(index, inputStream, env) {
+        var filename = env.currentFileInfo.filename;
+        if(less.mode !== 'browser' && less.mode !== 'rhino') {
+            filename = require('path').resolve(filename);
+        }
+
+        return {
+            lineNumber: getLocation(index, inputStream).line + 1,
+            fileName: filename
+        };
+    }
+
+    function LessError(e, env) {
+        var input = getInput(e, env),
+            loc = getLocation(e.index, input),
+            line = loc.line,
+            col  = loc.column,
+            callLine = e.call && getLocation(e.call, input).line,
+            lines = input.split('\n');
+
+        this.type = e.type || 'Syntax';
+        this.message = e.message;
+        this.filename = e.filename || env.currentFileInfo.filename;
+        this.index = e.index;
+        this.line = typeof(line) === 'number' ? line + 1 : null;
+        this.callLine = callLine + 1;
+        this.callExtract = lines[callLine];
+        this.stack = e.stack;
+        this.column = col;
+        this.extract = [
+            lines[line - 1],
+            lines[line],
+            lines[line + 1]
+        ];
+    }
+
+    LessError.prototype = new Error();
+    LessError.prototype.constructor = LessError;
+
+    this.env = env = env || {};
+
+    // The optimization level dictates the thoroughness of the parser,
+    // the lower the number, the less nodes it will create in the tree.
+    // This could matter for debugging, or if you want to access
+    // the individual nodes in the tree.
+    this.optimization = ('optimization' in this.env) ? this.env.optimization : 1;
+
+    //
+    // The Parser
+    //
+    parser = {
+
+        imports: imports,
+        //
+        // Parse an input string into an abstract syntax tree,
+        // @param str A string containing 'less' markup
+        // @param callback call `callback` when done.
+        // @param [additionalData] An optional map which can contains vars - a map (key, value) of variables to apply
+        //
+        parse: function (str, callback, additionalData) {
+            var root, line, lines, error = null, globalVars, modifyVars, preText = "";
+
+            i = j = currentPos = furthest = 0;
+
+            globalVars = (additionalData && additionalData.globalVars) ? less.Parser.serializeVars(additionalData.globalVars) + '\n' : '';
+            modifyVars = (additionalData && additionalData.modifyVars) ? '\n' + less.Parser.serializeVars(additionalData.modifyVars) : '';
+
+            if (globalVars || (additionalData && additionalData.banner)) {
+                preText = ((additionalData && additionalData.banner) ? additionalData.banner : "") + globalVars;
+                parser.imports.contentsIgnoredChars[env.currentFileInfo.filename] = preText.length;
+            }
+
+            str = str.replace(/\r\n/g, '\n');
+            // Remove potential UTF Byte Order Mark
+            input = str = preText + str.replace(/^\uFEFF/, '') + modifyVars;
+            parser.imports.contents[env.currentFileInfo.filename] = str;
+
+            // Split the input into chunks.
+            chunks = (function (input) {
+                var len = input.length, level = 0, parenLevel = 0,
+                    lastOpening, lastOpeningParen, lastMultiComment, lastMultiCommentEndBrace,
+                    chunks = [], emitFrom = 0,
+                    parserCurrentIndex, currentChunkStartIndex, cc, cc2, matched;
+
+                function fail(msg, index) {
+                    error = new(LessError)({
+                        index: index || parserCurrentIndex,
+                        type: 'Parse',
+                        message: msg,
+                        filename: env.currentFileInfo.filename
+                    }, env);
+                }
+
+                function emitChunk(force) {
+                    var len = parserCurrentIndex - emitFrom;
+                    if (((len < 512) && !force) || !len) {
+                        return;
+                    }
+                    chunks.push(input.slice(emitFrom, parserCurrentIndex + 1));
+                    emitFrom = parserCurrentIndex + 1;
+                }
+
+                for (parserCurrentIndex = 0; parserCurrentIndex < len; parserCurrentIndex++) {
+                    cc = input.charCodeAt(parserCurrentIndex);
+                    if (((cc >= 97) && (cc <= 122)) || (cc < 34)) {
+                        // a-z or whitespace
+                        continue;
+                    }
+
+                    switch (cc) {
+                        case 40:                        // (
+                            parenLevel++; 
+                            lastOpeningParen = parserCurrentIndex; 
+                            continue;
+                        case 41:                        // )
+                            if (--parenLevel < 0) {
+                                return fail("missing opening `(`");
+                            }
+                            continue;
+                        case 59:                        // ;
+                            if (!parenLevel) { emitChunk(); }
+                            continue;
+                        case 123:                       // {
+                            level++; 
+                            lastOpening = parserCurrentIndex; 
+                            continue;
+                        case 125:                       // }
+                            if (--level < 0) {
+                                return fail("missing opening `{`");
+                            }
+                            if (!level && !parenLevel) { emitChunk(); }
+                            continue;
+                        case 92:                        // \
+                            if (parserCurrentIndex < len - 1) { parserCurrentIndex++; continue; }
+                            return fail("unescaped `\\`");
+                        case 34:
+                        case 39:
+                        case 96:                        // ", ' and `
+                            matched = 0;
+                            currentChunkStartIndex = parserCurrentIndex;
+                            for (parserCurrentIndex = parserCurrentIndex + 1; parserCurrentIndex < len; parserCurrentIndex++) {
+                                cc2 = input.charCodeAt(parserCurrentIndex);
+                                if (cc2 > 96) { continue; }
+                                if (cc2 == cc) { matched = 1; break; }
+                                if (cc2 == 92) {        // \
+                                    if (parserCurrentIndex == len - 1) {
+                                        return fail("unescaped `\\`");
+                                    }
+                                    parserCurrentIndex++;
+                                }
+                            }
+                            if (matched) { continue; }
+                            return fail("unmatched `" + String.fromCharCode(cc) + "`", currentChunkStartIndex);
+                        case 47:                        // /, check for comment
+                            if (parenLevel || (parserCurrentIndex == len - 1)) { continue; }
+                            cc2 = input.charCodeAt(parserCurrentIndex + 1);
+                            if (cc2 == 47) {
+                                // //, find lnfeed
+                                for (parserCurrentIndex = parserCurrentIndex + 2; parserCurrentIndex < len; parserCurrentIndex++) {
+                                    cc2 = input.charCodeAt(parserCurrentIndex);
+                                    if ((cc2 <= 13) && ((cc2 == 10) || (cc2 == 13))) { break; }
+                                }
+                            } else if (cc2 == 42) {
+                                // /*, find */
+                                lastMultiComment = currentChunkStartIndex = parserCurrentIndex;
+                                for (parserCurrentIndex = parserCurrentIndex + 2; parserCurrentIndex < len - 1; parserCurrentIndex++) {
+                                    cc2 = input.charCodeAt(parserCurrentIndex);
+                                    if (cc2 == 125) { lastMultiCommentEndBrace = parserCurrentIndex; }
+                                    if (cc2 != 42) { continue; }
+                                    if (input.charCodeAt(parserCurrentIndex + 1) == 47) { break; }
+                                }
+                                if (parserCurrentIndex == len - 1) {
+                                    return fail("missing closing `*/`", currentChunkStartIndex);
+                                }
+                                parserCurrentIndex++;
+                            }
+                            continue;
+                        case 42:                       // *, check for unmatched */
+                            if ((parserCurrentIndex < len - 1) && (input.charCodeAt(parserCurrentIndex + 1) == 47)) {
+                                return fail("unmatched `/*`");
+                            }
+                            continue;
+                    }
+                }
+
+                if (level !== 0) {
+                    if ((lastMultiComment > lastOpening) && (lastMultiCommentEndBrace > lastMultiComment)) {
+                        return fail("missing closing `}` or `*/`", lastOpening);
+                    } else {
+                        return fail("missing closing `}`", lastOpening);
+                    }
+                } else if (parenLevel !== 0) {
+                    return fail("missing closing `)`", lastOpeningParen);
+                }
+
+                emitChunk(true);
+                return chunks;
+            })(str);
+
+            if (error) {
+                return callback(new(LessError)(error, env));
+            }
+
+            current = chunks[0];
+
+            // Start with the primary rule.
+            // The whole syntax tree is held under a Ruleset node,
+            // with the `root` property set to true, so no `{}` are
+            // output. The callback is called when the input is parsed.
+            try {
+                root = new(tree.Ruleset)(null, this.parsers.primary());
+                root.root = true;
+                root.firstRoot = true;
+            } catch (e) {
+                return callback(new(LessError)(e, env));
+            }
+
+            root.toCSS = (function (evaluate) {
+                return function (options, variables) {
+                    options = options || {};
+                    var evaldRoot,
+                        css,
+                        evalEnv = new tree.evalEnv(options);
+                        
+                    //
+                    // Allows setting variables with a hash, so:
+                    //
+                    //   `{ color: new(tree.Color)('#f01') }` will become:
+                    //
+                    //   new(tree.Rule)('@color',
+                    //     new(tree.Value)([
+                    //       new(tree.Expression)([
+                    //         new(tree.Color)('#f01')
+                    //       ])
+                    //     ])
+                    //   )
+                    //
+                    if (typeof(variables) === 'object' && !Array.isArray(variables)) {
+                        variables = Object.keys(variables).map(function (k) {
+                            var value = variables[k];
+
+                            if (! (value instanceof tree.Value)) {
+                                if (! (value instanceof tree.Expression)) {
+                                    value = new(tree.Expression)([value]);
+                                }
+                                value = new(tree.Value)([value]);
+                            }
+                            return new(tree.Rule)('@' + k, value, false, null, 0);
+                        });
+                        evalEnv.frames = [new(tree.Ruleset)(null, variables)];
+                    }
+
+                    try {
+                        var preEvalVisitors = [],
+                            visitors = [
+                                new(tree.joinSelectorVisitor)(),
+                                new(tree.processExtendsVisitor)(),
+                                new(tree.toCSSVisitor)({compress: Boolean(options.compress)})
+                            ], i, root = this;
+
+                        if (options.plugins) {
+                            for(i =0; i < options.plugins.length; i++) {
+                                if (options.plugins[i].isPreEvalVisitor) {
+                                    preEvalVisitors.push(options.plugins[i]);
+                                } else {
+                                    if (options.plugins[i].isPreVisitor) {
+                                        visitors.splice(0, 0, options.plugins[i]);
+                                    } else {
+                                        visitors.push(options.plugins[i]);
+                                    }
+                                }
+                            }
+                        }
+
+                        for(i = 0; i < preEvalVisitors.length; i++) {
+                            preEvalVisitors[i].run(root);
+                        }
+
+                        evaldRoot = evaluate.call(root, evalEnv);
+
+                        for(i = 0; i < visitors.length; i++) {
+                            visitors[i].run(evaldRoot);
+                        }
+
+                        if (options.sourceMap) {
+                            evaldRoot = new tree.sourceMapOutput(
+                                {
+                                    contentsIgnoredCharsMap: parser.imports.contentsIgnoredChars,
+                                    writeSourceMap: options.writeSourceMap,
+                                    rootNode: evaldRoot,
+                                    contentsMap: parser.imports.contents,
+                                    sourceMapFilename: options.sourceMapFilename,
+                                    sourceMapURL: options.sourceMapURL,
+                                    outputFilename: options.sourceMapOutputFilename,
+                                    sourceMapBasepath: options.sourceMapBasepath,
+                                    sourceMapRootpath: options.sourceMapRootpath,
+                                    outputSourceFiles: options.outputSourceFiles,
+                                    sourceMapGenerator: options.sourceMapGenerator
+                                });
+                        }
+
+                        css = evaldRoot.toCSS({
+                                compress: Boolean(options.compress),
+                                dumpLineNumbers: env.dumpLineNumbers,
+                                strictUnits: Boolean(options.strictUnits),
+                                numPrecision: 8});
+                    } catch (e) {
+                        throw new(LessError)(e, env);
+                    }
+
+                    if (options.cleancss && less.mode === 'node') {
+                        var CleanCSS = require('clean-css'),
+                            cleancssOptions = options.cleancssOptions || {};
+
+                        if (cleancssOptions.keepSpecialComments === undefined) {
+                            cleancssOptions.keepSpecialComments = "*";
+                        }
+                        cleancssOptions.processImport = false;
+                        cleancssOptions.noRebase = true;
+                        if (cleancssOptions.noAdvanced === undefined) {
+                            cleancssOptions.noAdvanced = true;
+                        }
+
+                        return new CleanCSS(cleancssOptions).minify(css);
+                    } else if (options.compress) {
+                        return css.replace(/(^(\s)+)|((\s)+$)/g, "");
+                    } else {
+                        return css;
+                    }
+                };
+            })(root.eval);
+
+            // If `i` is smaller than the `input.length - 1`,
+            // it means the parser wasn't able to parse the whole
+            // string, so we've got a parsing error.
+            //
+            // We try to extract a \n delimited string,
+            // showing the line where the parse error occured.
+            // We split it up into two parts (the part which parsed,
+            // and the part which didn't), so we can color them differently.
+            if (i < input.length - 1) {
+                i = furthest;
+                var loc = getLocation(i, input);
+                lines = input.split('\n');
+                line = loc.line + 1;
+
+                error = {
+                    type: "Parse",
+                    message: "Unrecognised input",
+                    index: i,
+                    filename: env.currentFileInfo.filename,
+                    line: line,
+                    column: loc.column,
+                    extract: [
+                        lines[line - 2],
+                        lines[line - 1],
+                        lines[line]
+                    ]
+                };
+            }
+
+            var finish = function (e) {
+                e = error || e || parser.imports.error;
+
+                if (e) {
+                    if (!(e instanceof LessError)) {
+                        e = new(LessError)(e, env);
+                    }
+
+                    return callback(e);
+                }
+                else {
+                    return callback(null, root);
+                }
+            };
+
+            if (env.processImports !== false) {
+                new tree.importVisitor(this.imports, finish)
+                    .run(root);
+            } else {
+                return finish();
+            }
+        },
+
+        //
+        // Here in, the parsing rules/functions
+        //
+        // The basic structure of the syntax tree generated is as follows:
+        //
+        //   Ruleset ->  Rule -> Value -> Expression -> Entity
+        //
+        // Here's some LESS code:
+        //
+        //    .class {
+        //      color: #fff;
+        //      border: 1px solid #000;
+        //      width: @w + 4px;
+        //      > .child {...}
+        //    }
+        //
+        // And here's what the parse tree might look like:
+        //
+        //     Ruleset (Selector '.class', [
+        //         Rule ("color",  Value ([Expression [Color #fff]]))
+        //         Rule ("border", Value ([Expression [Dimension 1px][Keyword "solid"][Color #000]]))
+        //         Rule ("width",  Value ([Expression [Operation "+" [Variable "@w"][Dimension 4px]]]))
+        //         Ruleset (Selector [Element '>', '.child'], [...])
+        //     ])
+        //
+        //  In general, most rules will try to parse a token with the `$()` function, and if the return
+        //  value is truly, will return a new node, of the relevant type. Sometimes, we need to check
+        //  first, before parsing, that's when we use `peek()`.
+        //
+        parsers: parsers = {
+            //
+            // The `primary` rule is the *entry* and *exit* point of the parser.
+            // The rules here can appear at any level of the parse tree.
+            //
+            // The recursive nature of the grammar is an interplay between the `block`
+            // rule, which represents `{ ... }`, the `ruleset` rule, and this `primary` rule,
+            // as represented by this simplified grammar:
+            //
+            //     primary  â†’  (ruleset | rule)+
+            //     ruleset  â†’  selector+ block
+            //     block    â†’  '{' primary '}'
+            //
+            // Only at one point is the primary rule not called from the
+            // block rule: at the root level.
+            //
+            primary: function () {
+                var mixin = this.mixin, $re = _$re, root = [], node;
+
+                while (current)
+                {
+                    node = this.extendRule() || mixin.definition() || this.rule() || this.ruleset() ||
+                        mixin.call() || this.comment() || this.rulesetCall() || this.directive();
+                    if (node) {
+                        root.push(node);
+                    } else {
+                        if (!($re(/^[\s\n]+/) || $re(/^;+/))) {
+                            break;
+                        }
+                    }
+                    if (peekChar('}')) {
+                        break;
+                    }
+                }
+
+                return root;
+            },
+
+            // We create a Comment node for CSS comments `/* */`,
+            // but keep the LeSS comments `//` silent, by just skipping
+            // over them.
+            comment: function () {
+                var comment;
+
+                if (input.charAt(i) !== '/') { return; }
+
+                if (input.charAt(i + 1) === '/') {
+                    return new(tree.Comment)($re(/^\/\/.*/), true, i, env.currentFileInfo);
+                }
+                comment = $re(/^\/\*(?:[^*]|\*+[^\/*])*\*+\/\n?/);
+                if (comment) {
+                    return new(tree.Comment)(comment, false, i, env.currentFileInfo);
+                }
+            },
+
+            comments: function () {
+                var comment, comments = [];
+
+                while(true) {
+                    comment = this.comment();
+                    if (!comment) {
+                        break;
+                    }
+                    comments.push(comment);
+                }
+
+                return comments;
+            },
+
+            //
+            // Entities are tokens which can be found inside an Expression
+            //
+            entities: {
+                //
+                // A string, which supports escaping " and '
+                //
+                //     "milky way" 'he\'s the one!'
+                //
+                quoted: function () {
+                    var str, j = i, e, index = i;
+
+                    if (input.charAt(j) === '~') { j++; e = true; } // Escaped strings
+                    if (input.charAt(j) !== '"' && input.charAt(j) !== "'") { return; }
+
+                    if (e) { $char('~'); }
+
+                    str = $re(/^"((?:[^"\\\r\n]|\\.)*)"|'((?:[^'\\\r\n]|\\.)*)'/);
+                    if (str) {
+                        return new(tree.Quoted)(str[0], str[1] || str[2], e, index, env.currentFileInfo);
+                    }
+                },
+
+                //
+                // A catch-all word, such as:
+                //
+                //     black border-collapse
+                //
+                keyword: function () {
+                    var k;
+
+                    k = $re(/^%|^[_A-Za-z-][_A-Za-z0-9-]*/);
+                    if (k) {
+                        var color = tree.Color.fromKeyword(k);
+                        if (color) {
+                            return color;
+                        }
+                        return new(tree.Keyword)(k);
+                    }
+                },
+
+                //
+                // A function call
+                //
+                //     rgb(255, 0, 255)
+                //
+                // We also try to catch IE's `alpha()`, but let the `alpha` parser
+                // deal with the details.
+                //
+                // The arguments are parsed with the `entities.arguments` parser.
+                //
+                call: function () {
+                    var name, nameLC, args, alpha_ret, index = i;
+
+                    name = /^([\w-]+|%|progid:[\w\.]+)\(/.exec(current);
+                    if (!name) { return; }
+
+                    name = name[1];
+                    nameLC = name.toLowerCase();
+                    if (nameLC === 'url') {
+                        return null;
+                    }
+
+                    i += name.length;
+
+                    if (nameLC === 'alpha') {
+                        alpha_ret = parsers.alpha();
+                        if(typeof alpha_ret !== 'undefined') {
+                            return alpha_ret;
+                        }
+                    }
+
+                    $char('('); // Parse the '(' and consume whitespace.
+
+                    args = this.arguments();
+
+                    if (! $char(')')) {
+                        return;
+                    }
+
+                    if (name) { return new(tree.Call)(name, args, index, env.currentFileInfo); }
+                },
+                arguments: function () {
+                    var args = [], arg;
+
+                    while (true) {
+                        arg = this.assignment() || parsers.expression();
+                        if (!arg) {
+                            break;
+                        }
+                        args.push(arg);
+                        if (! $char(',')) {
+                            break;
+                        }
+                    }
+                    return args;
+                },
+                literal: function () {
+                    return this.dimension() ||
+                           this.color() ||
+                           this.quoted() ||
+                           this.unicodeDescriptor();
+                },
+
+                // Assignments are argument entities for calls.
+                // They are present in ie filter properties as shown below.
+                //
+                //     filter: progid:DXImageTransform.Microsoft.Alpha( *opacity=50* )
+                //
+
+                assignment: function () {
+                    var key, value;
+                    key = $re(/^\w+(?=\s?=)/i);
+                    if (!key) {
+                        return;
+                    }
+                    if (!$char('=')) {
+                        return;
+                    }
+                    value = parsers.entity();
+                    if (value) {
+                        return new(tree.Assignment)(key, value);
+                    }
+                },
+
+                //
+                // Parse url() tokens
+                //
+                // We use a specific rule for urls, because they don't really behave like
+                // standard function calls. The difference is that the argument doesn't have
+                // to be enclosed within a string, so it can't be parsed as an Expression.
+                //
+                url: function () {
+                    var value;
+
+                    if (input.charAt(i) !== 'u' || !$re(/^url\(/)) {
+                        return;
+                    }
+
+                    value = this.quoted() || this.variable() ||
+                            $re(/^(?:(?:\\[\(\)'"])|[^\(\)'"])+/) || "";
+
+                    expectChar(')');
+
+                    return new(tree.URL)((value.value != null || value instanceof tree.Variable)
+                                        ? value : new(tree.Anonymous)(value), env.currentFileInfo);
+                },
+
+                //
+                // A Variable entity, such as `@fink`, in
+                //
+                //     width: @fink + 2px
+                //
+                // We use a different parser for variable definitions,
+                // see `parsers.variable`.
+                //
+                variable: function () {
+                    var name, index = i;
+
+                    if (input.charAt(i) === '@' && (name = $re(/^@@?[\w-]+/))) {
+                        return new(tree.Variable)(name, index, env.currentFileInfo);
+                    }
+                },
+
+                // A variable entity useing the protective {} e.g. @{var}
+                variableCurly: function () {
+                    var curly, index = i;
+
+                    if (input.charAt(i) === '@' && (curly = $re(/^@\{([\w-]+)\}/))) {
+                        return new(tree.Variable)("@" + curly[1], index, env.currentFileInfo);
+                    }
+                },
+
+                //
+                // A Hexadecimal color
+                //
+                //     #4F3C2F
+                //
+                // `rgb` and `hsl` colors are parsed through the `entities.call` parser.
+                //
+                color: function () {
+                    var rgb;
+
+                    if (input.charAt(i) === '#' && (rgb = $re(/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})/))) {
+                        return new(tree.Color)(rgb[1]);
+                    }
+                },
+
+                //
+                // A Dimension, that is, a number and a unit
+                //
+                //     0.5em 95%
+                //
+                dimension: function () {
+                    var value, c = input.charCodeAt(i);
+                    //Is the first char of the dimension 0-9, '.', '+' or '-'
+                    if ((c > 57 || c < 43) || c === 47 || c == 44) {
+                        return;
+                    }
+
+                    value = $re(/^([+-]?\d*\.?\d+)(%|[a-z]+)?/);
+                    if (value) {
+                        return new(tree.Dimension)(value[1], value[2]);
+                    }
+                },
+
+                //
+                // A unicode descriptor, as is used in unicode-range
+                //
+                // U+0??  or U+00A1-00A9
+                //
+                unicodeDescriptor: function () {
+                    var ud;
+
+                    ud = $re(/^U\+[0-9a-fA-F?]+(\-[0-9a-fA-F?]+)?/);
+                    if (ud) {
+                        return new(tree.UnicodeDescriptor)(ud[0]);
+                    }
+                },
+
+                //
+                // JavaScript code to be evaluated
+                //
+                //     `window.location.href`
+                //
+                javascript: function () {
+                    var str, j = i, e;
+
+                    if (input.charAt(j) === '~') { j++; e = true; } // Escaped strings
+                    if (input.charAt(j) !== '`') { return; }
+                    if (env.javascriptEnabled !== undefined && !env.javascriptEnabled) {
+                        error("You are using JavaScript, which has been disabled.");
+                    }
+
+                    if (e) { $char('~'); }
+
+                    str = $re(/^`([^`]*)`/);
+                    if (str) {
+                        return new(tree.JavaScript)(str[1], i, e);
+                    }
+                }
+            },
+
+            //
+            // The variable part of a variable definition. Used in the `rule` parser
+            //
+            //     @fink:
+            //
+            variable: function () {
+                var name;
+
+                if (input.charAt(i) === '@' && (name = $re(/^(@[\w-]+)\s*:/))) { return name[1]; }
+            },
+
+            //
+            // The variable part of a variable definition. Used in the `rule` parser
+            //
+            //     @fink();
+            //
+            rulesetCall: function () {
+                var name;
+
+                if (input.charAt(i) === '@' && (name = $re(/^(@[\w-]+)\s*\(\s*\)\s*;/))) { 
+                    return new tree.RulesetCall(name[1]); 
+                }
+            },
+
+            //
+            // extend syntax - used to extend selectors
+            //
+            extend: function(isRule) {
+                var elements, e, index = i, option, extendList, extend;
+
+                if (!(isRule ? $re(/^&:extend\(/) : $re(/^:extend\(/))) { return; }
+
+                do {
+                    option = null;
+                    elements = null;
+                    while (! (option = $re(/^(all)(?=\s*(\)|,))/))) {
+                        e = this.element();
+                        if (!e) { break; }
+                        if (elements) { elements.push(e); } else { elements = [ e ]; }
+                    }
+
+                    option = option && option[1];
+
+                    extend = new(tree.Extend)(new(tree.Selector)(elements), option, index);
+                    if (extendList) { extendList.push(extend); } else { extendList = [ extend ]; }
+
+                } while($char(","));
+                
+                expect(/^\)/);
+
+                if (isRule) {
+                    expect(/^;/);
+                }
+
+                return extendList;
+            },
+
+            //
+            // extendRule - used in a rule to extend all the parent selectors
+            //
+            extendRule: function() {
+                return this.extend(true);
+            },
+            
+            //
+            // Mixins
+            //
+            mixin: {
+                //
+                // A Mixin call, with an optional argument list
+                //
+                //     #mixins > .square(#fff);
+                //     .rounded(4px, black);
+                //     .button;
+                //
+                // The `while` loop is there because mixins can be
+                // namespaced, but we only support the child and descendant
+                // selector for now.
+                //
+                call: function () {
+                    var s = input.charAt(i), important = false, index = i, elemIndex,
+                        elements, elem, e, c, args;
+
+                    if (s !== '.' && s !== '#') { return; }
+
+                    save(); // stop us absorbing part of an invalid selector
+
+                    while (true) {
+                        elemIndex = i;
+                        e = $re(/^[#.](?:[\w-]|\\(?:[A-Fa-f0-9]{1,6} ?|[^A-Fa-f0-9]))+/);
+                        if (!e) {
+                            break;
+                        }
+                        elem = new(tree.Element)(c, e, elemIndex, env.currentFileInfo);
+                        if (elements) { elements.push(elem); } else { elements = [ elem ]; }
+                        c = $char('>');
+                    }
+
+                    if (elements) {
+                        if ($char('(')) {
+                            args = this.args(true).args;
+                            expectChar(')');
+                        }
+
+                        if (parsers.important()) {
+                            important = true;
+                        }
+
+                        if (parsers.end()) {
+                            forget();
+                            return new(tree.mixin.Call)(elements, args, index, env.currentFileInfo, important);
+                        }
+                    }
+
+                    restore();
+                },
+                args: function (isCall) {
+                    var parsers = parser.parsers, entities = parsers.entities,
+                        returner = { args:null, variadic: false },
+                        expressions = [], argsSemiColon = [], argsComma = [],
+                        isSemiColonSeperated, expressionContainsNamed, name, nameLoop, value, arg;
+
+                    save();
+
+                    while (true) {
+                        if (isCall) {
+                            arg = parsers.detachedRuleset() || parsers.expression();
+                        } else {
+                            parsers.comments();
+                            if (input.charAt(i) === '.' && $re(/^\.{3}/)) {
+                                returner.variadic = true;
+                                if ($char(";") && !isSemiColonSeperated) {
+                                    isSemiColonSeperated = true;
+                                }
+                                (isSemiColonSeperated ? argsSemiColon : argsComma)
+                                    .push({ variadic: true });
+                                break;
+                            }
+                            arg = entities.variable() || entities.literal() || entities.keyword();
+                        }
+
+                        if (!arg) {
+                            break;
+                        }
+
+                        nameLoop = null;
+                        if (arg.throwAwayComments) {
+                            arg.throwAwayComments();
+                        }
+                        value = arg;
+                        var val = null;
+
+                        if (isCall) {
+                            // Variable
+                            if (arg.value && arg.value.length == 1) {
+                                val = arg.value[0];
+                            }
+                        } else {
+                            val = arg;
+                        }
+
+                        if (val && val instanceof tree.Variable) {
+                            if ($char(':')) {
+                                if (expressions.length > 0) {
+                                    if (isSemiColonSeperated) {
+                                        error("Cannot mix ; and , as delimiter types");
+                                    }
+                                    expressionContainsNamed = true;
+                                }
+
+                                // we do not support setting a ruleset as a default variable - it doesn't make sense
+                                // However if we do want to add it, there is nothing blocking it, just don't error
+                                // and remove isCall dependency below
+                                value = (isCall && parsers.detachedRuleset()) || parsers.expression();
+
+                                if (!value) {
+                                    if (isCall) {
+                                        error("could not understand value for named argument");
+                                    } else {
+                                        restore();
+                                        returner.args = [];
+                                        return returner;
+                                    }
+                                }
+                                nameLoop = (name = val.name);
+                            } else if (!isCall && $re(/^\.{3}/)) {
+                                returner.variadic = true;
+                                if ($char(";") && !isSemiColonSeperated) {
+                                    isSemiColonSeperated = true;
+                                }
+                                (isSemiColonSeperated ? argsSemiColon : argsComma)
+                                    .push({ name: arg.name, variadic: true });
+                                break;
+                            } else if (!isCall) {
+                                name = nameLoop = val.name;
+                                value = null;
+                            }
+                        }
+
+                        if (value) {
+                            expressions.push(value);
+                        }
+
+                        argsComma.push({ name:nameLoop, value:value });
+
+                        if ($char(',')) {
+                            continue;
+                        }
+
+                        if ($char(';') || isSemiColonSeperated) {
+
+                            if (expressionContainsNamed) {
+                                error("Cannot mix ; and , as delimiter types");
+                            }
+
+                            isSemiColonSeperated = true;
+
+                            if (expressions.length > 1) {
+                                value = new(tree.Value)(expressions);
+                            }
+                            argsSemiColon.push({ name:name, value:value });
+
+                            name = null;
+                            expressions = [];
+                            expressionContainsNamed = false;
+                        }
+                    }
+
+                    forget();
+                    returner.args = isSemiColonSeperated ? argsSemiColon : argsComma;
+                    return returner;
+                },
+                //
+                // A Mixin definition, with a list of parameters
+                //
+                //     .rounded (@radius: 2px, @color) {
+                //        ...
+                //     }
+                //
+                // Until we have a finer grained state-machine, we have to
+                // do a look-ahead, to make sure we don't have a mixin call.
+                // See the `rule` function for more information.
+                //
+                // We start by matching `.rounded (`, and then proceed on to
+                // the argument list, which has optional default values.
+                // We store the parameters in `params`, with a `value` key,
+                // if there is a value, such as in the case of `@radius`.
+                //
+                // Once we've got our params list, and a closing `)`, we parse
+                // the `{...}` block.
+                //
+                definition: function () {
+                    var name, params = [], match, ruleset, cond, variadic = false;
+                    if ((input.charAt(i) !== '.' && input.charAt(i) !== '#') ||
+                        peek(/^[^{]*\}/)) {
+                        return;
+                    }
+
+                    save();
+
+                    match = $re(/^([#.](?:[\w-]|\\(?:[A-Fa-f0-9]{1,6} ?|[^A-Fa-f0-9]))+)\s*\(/);
+                    if (match) {
+                        name = match[1];
+
+                        var argInfo = this.args(false);
+                        params = argInfo.args;
+                        variadic = argInfo.variadic;
+
+                        // .mixincall("@{a}");
+                        // looks a bit like a mixin definition.. 
+                        // also
+                        // .mixincall(@a: {rule: set;});
+                        // so we have to be nice and restore
+                        if (!$char(')')) {
+                            furthest = i;
+                            restore();
+                            return;
+                        }
+                        
+                        parsers.comments();
+
+                        if ($re(/^when/)) { // Guard
+                            cond = expect(parsers.conditions, 'expected condition');
+                        }
+
+                        ruleset = parsers.block();
+
+                        if (ruleset) {
+                            forget();
+                            return new(tree.mixin.Definition)(name, params, ruleset, cond, variadic);
+                        } else {
+                            restore();
+                        }
+                    } else {
+                        forget();
+                    }
+                }
+            },
+
+            //
+            // Entities are the smallest recognized token,
+            // and can be found inside a rule's value.
+            //
+            entity: function () {
+                var entities = this.entities;
+
+                return entities.literal() || entities.variable() || entities.url() ||
+                       entities.call()    || entities.keyword()  || entities.javascript() ||
+                       this.comment();
+            },
+
+            //
+            // A Rule terminator. Note that we use `peek()` to check for '}',
+            // because the `block` rule will be expecting it, but we still need to make sure
+            // it's there, if ';' was ommitted.
+            //
+            end: function () {
+                return $char(';') || peekChar('}');
+            },
+
+            //
+            // IE's alpha function
+            //
+            //     alpha(opacity=88)
+            //
+            alpha: function () {
+                var value;
+
+                if (! $re(/^\(opacity=/i)) { return; }
+                value = $re(/^\d+/) || this.entities.variable();
+                if (value) {
+                    expectChar(')');
+                    return new(tree.Alpha)(value);
+                }
+            },
+
+            //
+            // A Selector Element
+            //
+            //     div
+            //     + h1
+            //     #socks
+            //     input[type="text"]
+            //
+            // Elements are the building blocks for Selectors,
+            // they are made out of a `Combinator` (see combinator rule),
+            // and an element name, such as a tag a class, or `*`.
+            //
+            element: function () {
+                var e, c, v, index = i;
+
+                c = this.combinator();
+
+                e = $re(/^(?:\d+\.\d+|\d+)%/) || $re(/^(?:[.#]?|:*)(?:[\w-]|[^\x00-\x9f]|\\(?:[A-Fa-f0-9]{1,6} ?|[^A-Fa-f0-9]))+/) ||
+                    $char('*') || $char('&') || this.attribute() || $re(/^\([^()@]+\)/) || $re(/^[\.#](?=@)/) ||
+                    this.entities.variableCurly();
+
+                if (! e) {
+                    save();
+                    if ($char('(')) {
+                        if ((v = this.selector()) && $char(')')) {
+                            e = new(tree.Paren)(v);
+                            forget();
+                        } else {
+                            restore();
+                        }
+                    } else {
+                        forget();
+                    }
+                }
+
+                if (e) { return new(tree.Element)(c, e, index, env.currentFileInfo); }
+            },
+
+            //
+            // Combinators combine elements together, in a Selector.
+            //
+            // Because our parser isn't white-space sensitive, special care
+            // has to be taken, when parsing the descendant combinator, ` `,
+            // as it's an empty space. We have to check the previous character
+            // in the input, to see if it's a ` ` character. More info on how
+            // we deal with this in *combinator.js*.
+            //
+            combinator: function () {
+                var c = input.charAt(i);
+                
+                if (c === '>' || c === '+' || c === '~' || c === '|' || c === '^') {
+                    i++;
+                    if (input.charAt(i) === '^') {
+                        c = '^^';
+                        i++;
+                    }
+                    while (isWhitespace(input, i)) { i++; }
+                    return new(tree.Combinator)(c);
+                } else if (isWhitespace(input, i - 1)) {
+                    return new(tree.Combinator)(" ");
+                } else {
+                    return new(tree.Combinator)(null);
+                }
+            },
+            //
+            // A CSS selector (see selector below)
+            // with less extensions e.g. the ability to extend and guard
+            //
+            lessSelector: function () {
+                return this.selector(true);
+            },
+            //
+            // A CSS Selector
+            //
+            //     .class > div + h1
+            //     li a:hover
+            //
+            // Selectors are made out of one or more Elements, see above.
+            //
+            selector: function (isLess) {
+                var index = i, $re = _$re, elements, extendList, c, e, extend, when, condition;
+
+                while ((isLess && (extend = this.extend())) || (isLess && (when = $re(/^when/))) || (e = this.element())) {
+                    if (when) {
+                        condition = expect(this.conditions, 'expected condition');
+                    } else if (condition) {
+                        error("CSS guard can only be used at the end of selector");
+                    } else if (extend) {
+                        if (extendList) { extendList.push(extend); } else { extendList = [ extend ]; }
+                    } else {
+                        if (extendList) { error("Extend can only be used at the end of selector"); }
+                        c = input.charAt(i);
+                        if (elements) { elements.push(e); } else { elements = [ e ]; }
+                        e = null;
+                    }
+                    if (c === '{' || c === '}' || c === ';' || c === ',' || c === ')') {
+                        break;
+                    }
+                }
+
+                if (elements) { return new(tree.Selector)(elements, extendList, condition, index, env.currentFileInfo); }
+                if (extendList) { error("Extend must be used to extend a selector, it cannot be used on its own"); }
+            },
+            attribute: function () {
+                if (! $char('[')) { return; }
+
+                var entities = this.entities,
+                    key, val, op;
+
+                if (!(key = entities.variableCurly())) {
+                    key = expect(/^(?:[_A-Za-z0-9-\*]*\|)?(?:[_A-Za-z0-9-]|\\.)+/);
+                }
+
+                op = $re(/^[|~*$^]?=/);
+                if (op) {
+                    val = entities.quoted() || $re(/^[0-9]+%/) || $re(/^[\w-]+/) || entities.variableCurly();
+                }
+
+                expectChar(']');
+
+                return new(tree.Attribute)(key, op, val);
+            },
+
+            //
+            // The `block` rule is used by `ruleset` and `mixin.definition`.
+            // It's a wrapper around the `primary` rule, with added `{}`.
+            //
+            block: function () {
+                var content;
+                if ($char('{') && (content = this.primary()) && $char('}')) {
+                    return content;
+                }
+            },
+
+            blockRuleset: function() {
+                var block = this.block();
+
+                if (block) {
+                    block = new tree.Ruleset(null, block);
+                }
+                return block;
+            },
+            
+            detachedRuleset: function() {
+                var blockRuleset = this.blockRuleset();
+                if (blockRuleset) {
+                    return new tree.DetachedRuleset(blockRuleset);
+                }
+            },
+
+            //
+            // div, .class, body > p {...}
+            //
+            ruleset: function () {
+                var selectors, s, rules, debugInfo;
+                
+                save();
+
+                if (env.dumpLineNumbers) {
+                    debugInfo = getDebugInfo(i, input, env);
+                }
+
+                while (true) {
+                    s = this.lessSelector();
+                    if (!s) {
+                        break;
+                    }
+                    if (selectors) { selectors.push(s); } else { selectors = [ s ]; }
+                    this.comments();
+                    if (s.condition && selectors.length > 1) {
+                        error("Guards are only currently allowed on a single selector.");
+                    }
+                    if (! $char(',')) { break; }
+                    if (s.condition) {
+                        error("Guards are only currently allowed on a single selector.");
+                    }
+                    this.comments();
+                }
+
+                if (selectors && (rules = this.block())) {
+                    forget();
+                    var ruleset = new(tree.Ruleset)(selectors, rules, env.strictImports);
+                    if (env.dumpLineNumbers) {
+                        ruleset.debugInfo = debugInfo;
+                    }
+                    return ruleset;
+                } else {
+                    // Backtrack
+                    furthest = i;
+                    restore();
+                }
+            },
+            rule: function (tryAnonymous) {
+                var name, value, startOfRule = i, c = input.charAt(startOfRule), important, merge, isVariable;
+
+                if (c === '.' || c === '#' || c === '&') { return; }
+
+                save();
+
+                name = this.variable() || this.ruleProperty();
+                if (name) {
+                    isVariable = typeof name === "string";
+                    
+                    if (isVariable) {
+                        value = this.detachedRuleset();
+                    }
+                    
+                    if (!value) {
+                        // prefer to try to parse first if its a variable or we are compressing
+                        // but always fallback on the other one
+                        value = !tryAnonymous && (env.compress || isVariable) ?
+                            (this.value() || this.anonymousValue()) :
+                            (this.anonymousValue() || this.value());
+    
+                        important = this.important();
+                        
+                        // a name returned by this.ruleProperty() is always an array of the form:
+                        // [string-1, ..., string-n, ""] or [string-1, ..., string-n, "+"]
+                        // where each item is a tree.Keyword or tree.Variable
+                        merge = !isVariable && name.pop().value;
+                    }
+
+                    if (value && this.end()) {
+                        forget();
+                        return new (tree.Rule)(name, value, important, merge, startOfRule, env.currentFileInfo);
+                    } else {
+                        furthest = i;
+                        restore();
+                        if (value && !tryAnonymous) {
+                            return this.rule(true);
+                        }
+                    }
+                } else {
+                    forget();
+                }
+            },
+            anonymousValue: function () {
+                var match;
+                match = /^([^@+\/'"*`(;{}-]*);/.exec(current);
+                if (match) {
+                    i += match[0].length - 1;
+                    return new(tree.Anonymous)(match[1]);
+                }
+            },
+
+            //
+            // An @import directive
+            //
+            //     @import "lib";
+            //
+            // Depending on our environemnt, importing is done differently:
+            // In the browser, it's an XHR request, in Node, it would be a
+            // file-system operation. The function used for importing is
+            // stored in `import`, which we pass to the Import constructor.
+            //
+            "import": function () {
+                var path, features, index = i;
+
+                save();
+
+                var dir = $re(/^@import?\s+/);
+
+                var options = (dir ? this.importOptions() : null) || {};
+
+                if (dir && (path = this.entities.quoted() || this.entities.url())) {
+                    features = this.mediaFeatures();
+                    if ($char(';')) {
+                        forget();
+                        features = features && new(tree.Value)(features);
+                        return new(tree.Import)(path, features, options, index, env.currentFileInfo);
+                    }
+                }
+
+                restore();
+            },
+
+            importOptions: function() {
+                var o, options = {}, optionName, value;
+
+                // list of options, surrounded by parens
+                if (! $char('(')) { return null; }
+                do {
+                    o = this.importOption();
+                    if (o) {
+                        optionName = o;
+                        value = true;
+                        switch(optionName) {
+                            case "css":
+                                optionName = "less";
+                                value = false;
+                            break;
+                            case "once":
+                                optionName = "multiple";
+                                value = false;
+                            break;
+                        }
+                        options[optionName] = value;
+                        if (! $char(',')) { break; }
+                    }
+                } while (o);
+                expectChar(')');
+                return options;
+            },
+
+            importOption: function() {
+                var opt = $re(/^(less|css|multiple|once|inline|reference)/);
+                if (opt) {
+                    return opt[1];
+                }
+            },
+
+            mediaFeature: function () {
+                var entities = this.entities, nodes = [], e, p;
+                do {
+                    e = entities.keyword() || entities.variable();
+                    if (e) {
+                        nodes.push(e);
+                    } else if ($char('(')) {
+                        p = this.property();
+                        e = this.value();
+                        if ($char(')')) {
+                            if (p && e) {
+                                nodes.push(new(tree.Paren)(new(tree.Rule)(p, e, null, null, i, env.currentFileInfo, true)));
+                            } else if (e) {
+                                nodes.push(new(tree.Paren)(e));
+                            } else {
+                                return null;
+                            }
+                        } else { return null; }
+                    }
+                } while (e);
+
+                if (nodes.length > 0) {
+                    return new(tree.Expression)(nodes);
+                }
+            },
+
+            mediaFeatures: function () {
+                var entities = this.entities, features = [], e;
+                do {
+                    e = this.mediaFeature();
+                    if (e) {
+                        features.push(e);
+                        if (! $char(',')) { break; }
+                    } else {
+                        e = entities.variable();
+                        if (e) {
+                            features.push(e);
+                            if (! $char(',')) { break; }
+                        }
+                    }
+                } while (e);
+
+                return features.length > 0 ? features : null;
+            },
+
+            media: function () {
+                var features, rules, media, debugInfo;
+
+                if (env.dumpLineNumbers) {
+                    debugInfo = getDebugInfo(i, input, env);
+                }
+
+                if ($re(/^@media/)) {
+                    features = this.mediaFeatures();
+
+                    rules = this.block();
+                    if (rules) {
+                        media = new(tree.Media)(rules, features, i, env.currentFileInfo);
+                        if (env.dumpLineNumbers) {
+                            media.debugInfo = debugInfo;
+                        }
+                        return media;
+                    }
+                }
+            },
+
+            //
+            // A CSS Directive
+            //
+            //     @charset "utf-8";
+            //
+            directive: function () {
+                var index = i, name, value, rules, nonVendorSpecificName,
+                    hasIdentifier, hasExpression, hasUnknown, hasBlock = true;
+
+                if (input.charAt(i) !== '@') { return; }
+
+                value = this['import']() || this.media();
+                if (value) {
+                    return value;
+                }
+
+                save();
+
+                name = $re(/^@[a-z-]+/);
+                
+                if (!name) { return; }
+
+                nonVendorSpecificName = name;
+                if (name.charAt(1) == '-' && name.indexOf('-', 2) > 0) {
+                    nonVendorSpecificName = "@" + name.slice(name.indexOf('-', 2) + 1);
+                }
+
+                switch(nonVendorSpecificName) {
+                    /*
+                    case "@font-face":
+                    case "@viewport":
+                    case "@top-left":
+                    case "@top-left-corner":
+                    case "@top-center":
+                    case "@top-right":
+                    case "@top-right-corner":
+                    case "@bottom-left":
+                    case "@bottom-left-corner":
+                    case "@bottom-center":
+                    case "@bottom-right":
+                    case "@bottom-right-corner":
+                    case "@left-top":
+                    case "@left-middle":
+                    case "@left-bottom":
+                    case "@right-top":
+                    case "@right-middle":
+                    case "@right-bottom":
+                        hasBlock = true;
+                        break;
+                    */
+                    case "@charset":
+                        hasIdentifier = true;
+                        hasBlock = false;
+                        break;
+                    case "@namespace":
+                        hasExpression = true;
+                        hasBlock = false;
+                        break;
+                    case "@keyframes":
+                        hasIdentifier = true;
+                        break;
+                    case "@host":
+                    case "@page":
+                    case "@document":
+                    case "@supports":
+                        hasUnknown = true;
+                        break;
+                }
+
+                if (hasIdentifier) {
+                    value = this.entity();
+                    if (!value) {
+                        error("expected " + name + " identifier");
+                    }
+                } else if (hasExpression) {
+                    value = this.expression();
+                    if (!value) {
+                        error("expected " + name + " expression");
+                    }
+                } else if (hasUnknown) {
+                    value = ($re(/^[^{;]+/) || '').trim();
+                    if (value) {
+                        value = new(tree.Anonymous)(value);
+                    }
+                }
+
+                if (hasBlock) {
+                    rules = this.blockRuleset();
+                }
+
+                if (rules || (!hasBlock && value && $char(';'))) {
+                    forget();
+                    return new(tree.Directive)(name, value, rules, index, env.currentFileInfo, 
+                        env.dumpLineNumbers ? getDebugInfo(index, input, env) : null);
+                }
+
+                restore();
+            },
+
+            //
+            // A Value is a comma-delimited list of Expressions
+            //
+            //     font-family: Baskerville, Georgia, serif;
+            //
+            // In a Rule, a Value represents everything after the `:`,
+            // and before the `;`.
+            //
+            value: function () {
+                var e, expressions = [];
+
+                do {
+                    e = this.expression();
+                    if (e) {
+                        expressions.push(e);
+                        if (! $char(',')) { break; }
+                    }
+                } while(e);
+
+                if (expressions.length > 0) {
+                    return new(tree.Value)(expressions);
+                }
+            },
+            important: function () {
+                if (input.charAt(i) === '!') {
+                    return $re(/^! *important/);
+                }
+            },
+            sub: function () {
+                var a, e;
+
+                if ($char('(')) {
+                    a = this.addition();
+                    if (a) {
+                        e = new(tree.Expression)([a]);
+                        expectChar(')');
+                        e.parens = true;
+                        return e;
+                    }
+                }
+            },
+            multiplication: function () {
+                var m, a, op, operation, isSpaced;
+                m = this.operand();
+                if (m) {
+                    isSpaced = isWhitespace(input, i - 1);
+                    while (true) {
+                        if (peek(/^\/[*\/]/)) {
+                            break;
+                        }
+                        op = $char('/') || $char('*');
+
+                        if (!op) { break; }
+
+                        a = this.operand();
+
+                        if (!a) { break; }
+
+                        m.parensInOp = true;
+                        a.parensInOp = true;
+                        operation = new(tree.Operation)(op, [operation || m, a], isSpaced);
+                        isSpaced = isWhitespace(input, i - 1);
+                    }
+                    return operation || m;
+                }
+            },
+            addition: function () {
+                var m, a, op, operation, isSpaced;
+                m = this.multiplication();
+                if (m) {
+                    isSpaced = isWhitespace(input, i - 1);
+                    while (true) {
+                        op = $re(/^[-+]\s+/) || (!isSpaced && ($char('+') || $char('-')));
+                        if (!op) {
+                            break;
+                        }
+                        a = this.multiplication();
+                        if (!a) {
+                            break;
+                        }
+                        
+                        m.parensInOp = true;
+                        a.parensInOp = true;
+                        operation = new(tree.Operation)(op, [operation || m, a], isSpaced);
+                        isSpaced = isWhitespace(input, i - 1);
+                    }
+                    return operation || m;
+                }
+            },
+            conditions: function () {
+                var a, b, index = i, condition;
+
+                a = this.condition();
+                if (a) {
+                    while (true) {
+                        if (!peek(/^,\s*(not\s*)?\(/) || !$char(',')) {
+                            break;
+                        }
+                        b = this.condition();
+                        if (!b) {
+                            break;
+                        }
+                        condition = new(tree.Condition)('or', condition || a, b, index);
+                    }
+                    return condition || a;
+                }
+            },
+            condition: function () {
+                var entities = this.entities, index = i, negate = false,
+                    a, b, c, op;
+
+                if ($re(/^not/)) { negate = true; }
+                expectChar('(');
+                a = this.addition() || entities.keyword() || entities.quoted();
+                if (a) {
+                    op = $re(/^(?:>=|<=|=<|[<=>])/);
+                    if (op) {
+                        b = this.addition() || entities.keyword() || entities.quoted();
+                        if (b) {
+                            c = new(tree.Condition)(op, a, b, index, negate);
+                        } else {
+                            error('expected expression');
+                        }
+                    } else {
+                        c = new(tree.Condition)('=', a, new(tree.Keyword)('true'), index, negate);
+                    }
+                    expectChar(')');
+                    return $re(/^and/) ? new(tree.Condition)('and', c, this.condition()) : c;
+                }
+            },
+
+            //
+            // An operand is anything that can be part of an operation,
+            // such as a Color, or a Variable
+            //
+            operand: function () {
+                var entities = this.entities,
+                    p = input.charAt(i + 1), negate;
+
+                if (input.charAt(i) === '-' && (p === '@' || p === '(')) { negate = $char('-'); }
+                var o = this.sub() || entities.dimension() ||
+                        entities.color() || entities.variable() ||
+                        entities.call();
+
+                if (negate) {
+                    o.parensInOp = true;
+                    o = new(tree.Negative)(o);
+                }
+
+                return o;
+            },
+
+            //
+            // Expressions either represent mathematical operations,
+            // or white-space delimited Entities.
+            //
+            //     1px solid black
+            //     @var * 2
+            //
+            expression: function () {
+                var entities = [], e, delim;
+
+                do {
+                    e = this.addition() || this.entity();
+                    if (e) {
+                        entities.push(e);
+                        // operations do not allow keyword "/" dimension (e.g. small/20px) so we support that here
+                        if (!peek(/^\/[\/*]/)) {
+                            delim = $char('/');
+                            if (delim) {
+                                entities.push(new(tree.Anonymous)(delim));
+                            }
+                        }
+                    }
+                } while (e);
+                if (entities.length > 0) {
+                    return new(tree.Expression)(entities);
+                }
+            },
+            property: function () {
+                var name = $re(/^(\*?-?[_a-zA-Z0-9-]+)\s*:/);
+                if (name) {
+                    return name[1];
+                }
+            },
+            ruleProperty: function () {
+                var c = current, name = [], index = [], length = 0, s, k;
+                
+                function match(re) {
+                    var a = re.exec(c);
+                    if (a) {
+                        index.push(i + length);
+                        length += a[0].length;
+                        c = c.slice(a[1].length);
+                        return name.push(a[1]);
+                    }
+                }
+
+                match(/^(\*?)/);
+                while (match(/^((?:[\w-]+)|(?:@\{[\w-]+\}))/)); // !
+                if ((name.length > 1) && match(/^\s*((?:\+_|\+)?)\s*:/)) {
+                    // at last, we have the complete match now. move forward, 
+                    // convert name particles to tree objects and return:
+                    skipWhitespace(length);
+                    if (name[0] === '') {
+                        name.shift();
+                        index.shift();
+                    }
+                    for (k = 0; k < name.length; k++) {
+                        s = name[k];
+                        name[k] = (s.charAt(0) !== '@')
+                            ? new(tree.Keyword)(s)
+                            : new(tree.Variable)('@' + s.slice(2, -1), 
+                                index[k], env.currentFileInfo);
+                    }
+                    return name;
+                }
+            }
+        }
+    };
+    return parser;
+};
+less.Parser.serializeVars = function(vars) {
+    var s = '';
+
+    for (var name in vars) {
+        if (Object.hasOwnProperty.call(vars, name)) {
+            var value = vars[name];
+            s += ((name[0] === '@') ? '' : '@') + name +': '+ value +
+                    ((('' + value).slice(-1) === ';') ? '' : ';');
+        }
+    }
+
+    return s;
+};
+
+(function (tree) {
+
+tree.functions = {
+    rgb: function (r, g, b) {
+        return this.rgba(r, g, b, 1.0);
+    },
+    rgba: function (r, g, b, a) {
+        var rgb = [r, g, b].map(function (c) { return scaled(c, 255); });
+        a = number(a);
+        return new(tree.Color)(rgb, a);
+    },
+    hsl: function (h, s, l) {
+        return this.hsla(h, s, l, 1.0);
+    },
+    hsla: function (h, s, l, a) {
+        function hue(h) {
+            h = h < 0 ? h + 1 : (h > 1 ? h - 1 : h);
+            if      (h * 6 < 1) { return m1 + (m2 - m1) * h * 6; }
+            else if (h * 2 < 1) { return m2; }
+            else if (h * 3 < 2) { return m1 + (m2 - m1) * (2/3 - h) * 6; }
+            else                { return m1; }
+        }
+
+        h = (number(h) % 360) / 360;
+        s = clamp(number(s)); l = clamp(number(l)); a = clamp(number(a));
+
+        var m2 = l <= 0.5 ? l * (s + 1) : l + s - l * s;
+        var m1 = l * 2 - m2;
+
+        return this.rgba(hue(h + 1/3) * 255,
+                         hue(h)       * 255,
+                         hue(h - 1/3) * 255,
+                         a);
+    },
+
+    hsv: function(h, s, v) {
+        return this.hsva(h, s, v, 1.0);
+    },
+
+    hsva: function(h, s, v, a) {
+        h = ((number(h) % 360) / 360) * 360;
+        s = number(s); v = number(v); a = number(a);
+
+        var i, f;
+        i = Math.floor((h / 60) % 6);
+        f = (h / 60) - i;
+
+        var vs = [v,
+                  v * (1 - s),
+                  v * (1 - f * s),
+                  v * (1 - (1 - f) * s)];
+        var perm = [[0, 3, 1],
+                    [2, 0, 1],
+                    [1, 0, 3],
+                    [1, 2, 0],
+                    [3, 1, 0],
+                    [0, 1, 2]];
+
+        return this.rgba(vs[perm[i][0]] * 255,
+                         vs[perm[i][1]] * 255,
+                         vs[perm[i][2]] * 255,
+                         a);
+    },
+
+    hue: function (color) {
+        return new(tree.Dimension)(Math.round(color.toHSL().h));
+    },
+    saturation: function (color) {
+        return new(tree.Dimension)(Math.round(color.toHSL().s * 100), '%');
+    },
+    lightness: function (color) {
+        return new(tree.Dimension)(Math.round(color.toHSL().l * 100), '%');
+    },
+    hsvhue: function(color) {
+        return new(tree.Dimension)(Math.round(color.toHSV().h));
+    },
+    hsvsaturation: function (color) {
+        return new(tree.Dimension)(Math.round(color.toHSV().s * 100), '%');
+    },
+    hsvvalue: function (color) {
+        return new(tree.Dimension)(Math.round(color.toHSV().v * 100), '%');
+    },
+    red: function (color) {
+        return new(tree.Dimension)(color.rgb[0]);
+    },
+    green: function (color) {
+        return new(tree.Dimension)(color.rgb[1]);
+    },
+    blue: function (color) {
+        return new(tree.Dimension)(color.rgb[2]);
+    },
+    alpha: function (color) {
+        return new(tree.Dimension)(color.toHSL().a);
+    },
+    luma: function (color) {
+        return new(tree.Dimension)(Math.round(color.luma() * color.alpha * 100), '%');
+    },
+    luminance: function (color) {
+        var luminance =
+            (0.2126 * color.rgb[0] / 255)
+          + (0.7152 * color.rgb[1] / 255)
+          + (0.0722 * color.rgb[2] / 255);
+
+        return new(tree.Dimension)(Math.round(luminance * color.alpha * 100), '%');
+    },
+    saturate: function (color, amount) {
+        // filter: saturate(3.2);
+        // should be kept as is, so check for color
+        if (!color.rgb) {
+            return null;
+        }
+        var hsl = color.toHSL();
+
+        hsl.s += amount.value / 100;
+        hsl.s = clamp(hsl.s);
+        return hsla(hsl);
+    },
+    desaturate: function (color, amount) {
+        var hsl = color.toHSL();
+
+        hsl.s -= amount.value / 100;
+        hsl.s = clamp(hsl.s);
+        return hsla(hsl);
+    },
+    lighten: function (color, amount) {
+        var hsl = color.toHSL();
+
+        hsl.l += amount.value / 100;
+        hsl.l = clamp(hsl.l);
+        return hsla(hsl);
+    },
+    darken: function (color, amount) {
+        var hsl = color.toHSL();
+
+        hsl.l -= amount.value / 100;
+        hsl.l = clamp(hsl.l);
+        return hsla(hsl);
+    },
+    fadein: function (color, amount) {
+        var hsl = color.toHSL();
+
+        hsl.a += amount.value / 100;
+        hsl.a = clamp(hsl.a);
+        return hsla(hsl);
+    },
+    fadeout: function (color, amount) {
+        var hsl = color.toHSL();
+
+        hsl.a -= amount.value / 100;
+        hsl.a = clamp(hsl.a);
+        return hsla(hsl);
+    },
+    fade: function (color, amount) {
+        var hsl = color.toHSL();
+
+        hsl.a = amount.value / 100;
+        hsl.a = clamp(hsl.a);
+        return hsla(hsl);
+    },
+    spin: function (color, amount) {
+        var hsl = color.toHSL();
+        var hue = (hsl.h + amount.value) % 360;
+
+        hsl.h = hue < 0 ? 360 + hue : hue;
+
+        return hsla(hsl);
+    },
+    //
+    // Copyright (c) 2006-2009 Hampton Catlin, Nathan Weizenbaum, and Chris Eppstein
+    // http://sass-lang.com
+    //
+    mix: function (color1, color2, weight) {
+        if (!weight) {
+            weight = new(tree.Dimension)(50);
+        }
+        var p = weight.value / 100.0;
+        var w = p * 2 - 1;
+        var a = color1.toHSL().a - color2.toHSL().a;
+
+        var w1 = (((w * a == -1) ? w : (w + a) / (1 + w * a)) + 1) / 2.0;
+        var w2 = 1 - w1;
+
+        var rgb = [color1.rgb[0] * w1 + color2.rgb[0] * w2,
+                   color1.rgb[1] * w1 + color2.rgb[1] * w2,
+                   color1.rgb[2] * w1 + color2.rgb[2] * w2];
+
+        var alpha = color1.alpha * p + color2.alpha * (1 - p);
+
+        return new(tree.Color)(rgb, alpha);
+    },
+    greyscale: function (color) {
+        return this.desaturate(color, new(tree.Dimension)(100));
+    },
+    contrast: function (color, dark, light, threshold) {
+        // filter: contrast(3.2);
+        // should be kept as is, so check for color
+        if (!color.rgb) {
+            return null;
+        }
+        if (typeof light === 'undefined') {
+            light = this.rgba(255, 255, 255, 1.0);
+        }
+        if (typeof dark === 'undefined') {
+            dark = this.rgba(0, 0, 0, 1.0);
+        }
+        //Figure out which is actually light and dark!
+        if (dark.luma() > light.luma()) {
+            var t = light;
+            light = dark;
+            dark = t;
+        }
+        if (typeof threshold === 'undefined') {
+            threshold = 0.43;
+        } else {
+            threshold = number(threshold);
+        }
+        if (color.luma() < threshold) {
+            return light;
+        } else {
+            return dark;
+        }
+    },
+    e: function (str) {
+        return new(tree.Anonymous)(str instanceof tree.JavaScript ? str.evaluated : str);
+    },
+    escape: function (str) {
+        return new(tree.Anonymous)(encodeURI(str.value).replace(/=/g, "%3D").replace(/:/g, "%3A").replace(/#/g, "%23").replace(/;/g, "%3B").replace(/\(/g, "%28").replace(/\)/g, "%29"));
+    },
+    replace: function (string, pattern, replacement, flags) {
+        var result = string.value;
+
+        result = result.replace(new RegExp(pattern.value, flags ? flags.value : ''), replacement.value);
+        return new(tree.Quoted)(string.quote || '', result, string.escaped);
+    },
+    '%': function (string /* arg, arg, ...*/) {
+        var args = Array.prototype.slice.call(arguments, 1),
+            result = string.value;
+
+        for (var i = 0; i < args.length; i++) {
+            /*jshint loopfunc:true */
+            result = result.replace(/%[sda]/i, function(token) {
+                var value = token.match(/s/i) ? args[i].value : args[i].toCSS();
+                return token.match(/[A-Z]$/) ? encodeURIComponent(value) : value;
+            });
+        }
+        result = result.replace(/%%/g, '%');
+        return new(tree.Quoted)(string.quote || '', result, string.escaped);
+    },
+    unit: function (val, unit) {
+        if(!(val instanceof tree.Dimension)) {
+            throw { type: "Argument", message: "the first argument to unit must be a number" + (val instanceof tree.Operation ? ". Have you forgotten parenthesis?" : "") };
+        }
+        if (unit) {
+            if (unit instanceof tree.Keyword) {
+                unit = unit.value;
+            } else {
+                unit = unit.toCSS();
+            }
+        } else {
+            unit = "";
+        }
+        return new(tree.Dimension)(val.value, unit);
+    },
+    convert: function (val, unit) {
+        return val.convertTo(unit.value);
+    },
+    round: function (n, f) {
+        var fraction = typeof(f) === "undefined" ? 0 : f.value;
+        return _math(function(num) { return num.toFixed(fraction); }, null, n);
+    },
+    pi: function () {
+        return new(tree.Dimension)(Math.PI);
+    },
+    mod: function(a, b) {
+        return new(tree.Dimension)(a.value % b.value, a.unit);
+    },
+    pow: function(x, y) {
+        if (typeof x === "number" && typeof y === "number") {
+            x = new(tree.Dimension)(x);
+            y = new(tree.Dimension)(y);
+        } else if (!(x instanceof tree.Dimension) || !(y instanceof tree.Dimension)) {
+            throw { type: "Argument", message: "arguments must be numbers" };
+        }
+
+        return new(tree.Dimension)(Math.pow(x.value, y.value), x.unit);
+    },
+    _minmax: function (isMin, args) {
+        args = Array.prototype.slice.call(args);
+        switch(args.length) {
+            case 0: throw { type: "Argument", message: "one or more arguments required" };
+        }
+        var i, j, current, currentUnified, referenceUnified, unit, unitStatic, unitClone,
+            order  = [], // elems only contains original argument values.
+            values = {}; // key is the unit.toString() for unified tree.Dimension values,
+                         // value is the index into the order array.
+        for (i = 0; i < args.length; i++) {
+            current = args[i];
+            if (!(current instanceof tree.Dimension)) {
+                if(Array.isArray(args[i].value)) {
+                    Array.prototype.push.apply(args, Array.prototype.slice.call(args[i].value));
+                }
+                continue;
+            }
+            currentUnified = current.unit.toString() === "" && unitClone !== undefined ? new(tree.Dimension)(current.value, unitClone).unify() : current.unify();
+            unit = currentUnified.unit.toString() === "" && unitStatic !== undefined ? unitStatic : currentUnified.unit.toString();         
+            unitStatic = unit !== "" && unitStatic === undefined || unit !== "" && order[0].unify().unit.toString() === "" ? unit : unitStatic;
+            unitClone = unit !== "" && unitClone === undefined ? current.unit.toString() : unitClone;
+            j = values[""] !== undefined && unit !== "" && unit === unitStatic ? values[""] : values[unit];
+            if (j === undefined) {
+                if(unitStatic !== undefined && unit !== unitStatic) {
+                    throw{ type: "Argument", message: "incompatible types" };
+                }
+                values[unit] = order.length;
+                order.push(current);
+                continue;
+            }
+            referenceUnified = order[j].unit.toString() === "" && unitClone !== undefined ? new(tree.Dimension)(order[j].value, unitClone).unify() : order[j].unify();
+            if ( isMin && currentUnified.value < referenceUnified.value ||
+                !isMin && currentUnified.value > referenceUnified.value) {
+                order[j] = current;
+            }
+        }
+        if (order.length == 1) {
+            return order[0];
+        }
+        args = order.map(function (a) { return a.toCSS(this.env); }).join(this.env.compress ? "," : ", ");
+        return new(tree.Anonymous)((isMin ? "min" : "max") + "(" + args + ")");
+    },
+    min: function () {
+        return this._minmax(true, arguments);
+    },
+    max: function () {
+        return this._minmax(false, arguments);
+    },
+    "get-unit": function (n) {
+        return new(tree.Anonymous)(n.unit);
+    },
+    argb: function (color) {
+        return new(tree.Anonymous)(color.toARGB());
+    },
+    percentage: function (n) {
+        return new(tree.Dimension)(n.value * 100, '%');
+    },
+    color: function (n) {
+        if (n instanceof tree.Quoted) {
+            var colorCandidate = n.value,
+                returnColor;
+            returnColor = tree.Color.fromKeyword(colorCandidate);
+            if (returnColor) {
+                return returnColor;
+            }
+            if (/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})/.test(colorCandidate)) {
+                return new(tree.Color)(colorCandidate.slice(1));
+            }
+            throw { type: "Argument", message: "argument must be a color keyword or 3/6 digit hex e.g. #FFF" };
+        } else {
+            throw { type: "Argument", message: "argument must be a string" };
+        }
+    },
+    iscolor: function (n) {
+        return this._isa(n, tree.Color);
+    },
+    isnumber: function (n) {
+        return this._isa(n, tree.Dimension);
+    },
+    isstring: function (n) {
+        return this._isa(n, tree.Quoted);
+    },
+    iskeyword: function (n) {
+        return this._isa(n, tree.Keyword);
+    },
+    isurl: function (n) {
+        return this._isa(n, tree.URL);
+    },
+    ispixel: function (n) {
+        return this.isunit(n, 'px');
+    },
+    ispercentage: function (n) {
+        return this.isunit(n, '%');
+    },
+    isem: function (n) {
+        return this.isunit(n, 'em');
+    },
+    isunit: function (n, unit) {
+        return (n instanceof tree.Dimension) && n.unit.is(unit.value || unit) ? tree.True : tree.False;
+    },
+    _isa: function (n, Type) {
+        return (n instanceof Type) ? tree.True : tree.False;
+    },
+    tint: function(color, amount) {
+        return this.mix(this.rgb(255,255,255), color, amount);
+    },
+    shade: function(color, amount) {
+        return this.mix(this.rgb(0, 0, 0), color, amount);
+    },   
+    extract: function(values, index) {
+        index = index.value - 1; // (1-based index)       
+        // handle non-array values as an array of length 1
+        // return 'undefined' if index is invalid
+        return Array.isArray(values.value) 
+            ? values.value[index] : Array(values)[index];
+    },
+    length: function(values) {
+        var n = Array.isArray(values.value) ? values.value.length : 1;
+        return new tree.Dimension(n);
+    },
+
+    "data-uri": function(mimetypeNode, filePathNode) {
+
+        if (typeof window !== 'undefined') {
+            return new tree.URL(filePathNode || mimetypeNode, this.currentFileInfo).eval(this.env);
+        }
+
+        var mimetype = mimetypeNode.value;
+        var filePath = (filePathNode && filePathNode.value);
+
+        var fs = require('fs'),
+            path = require('path'),
+            useBase64 = false;
+
+        if (arguments.length < 2) {
+            filePath = mimetype;
+        }
+
+        if (this.env.isPathRelative(filePath)) {
+            if (this.currentFileInfo.relativeUrls) {
+                filePath = path.join(this.currentFileInfo.currentDirectory, filePath);
+            } else {
+                filePath = path.join(this.currentFileInfo.entryPath, filePath);
+            }
+        }
+
+        // detect the mimetype if not given
+        if (arguments.length < 2) {
+            var mime;
+            try {
+                mime = require('mime');
+            } catch (ex) {
+                mime = tree._mime;
+            }
+
+            mimetype = mime.lookup(filePath);
+
+            // use base 64 unless it's an ASCII or UTF-8 format
+            var charset = mime.charsets.lookup(mimetype);
+            useBase64 = ['US-ASCII', 'UTF-8'].indexOf(charset) < 0;
+            if (useBase64) { mimetype += ';base64'; }
+        }
+        else {
+            useBase64 = /;base64$/.test(mimetype);
+        }
+
+        var buf = fs.readFileSync(filePath);
+
+        // IE8 cannot handle a data-uri larger than 32KB. If this is exceeded
+        // and the --ieCompat flag is enabled, return a normal url() instead.
+        var DATA_URI_MAX_KB = 32,
+            fileSizeInKB = parseInt((buf.length / 1024), 10);
+        if (fileSizeInKB >= DATA_URI_MAX_KB) {
+
+            if (this.env.ieCompat !== false) {
+                if (!this.env.silent) {
+                    console.warn("Skipped data-uri embedding of %s because its size (%dKB) exceeds IE8-safe %dKB!", filePath, fileSizeInKB, DATA_URI_MAX_KB);
+                }
+
+                return new tree.URL(filePathNode || mimetypeNode, this.currentFileInfo).eval(this.env);
+            }
+        }
+
+        buf = useBase64 ? buf.toString('base64')
+                        : encodeURIComponent(buf);
+
+        var uri = "\"data:" + mimetype + ',' + buf + "\"";
+        return new(tree.URL)(new(tree.Anonymous)(uri));
+    },
+
+    "svg-gradient": function(direction) {
+
+        function throwArgumentDescriptor() {
+            throw { type: "Argument", message: "svg-gradient expects direction, start_color [start_position], [color position,]..., end_color [end_position]" };
+        }
+
+        if (arguments.length < 3) {
+            throwArgumentDescriptor();
+        }
+        var stops = Array.prototype.slice.call(arguments, 1),
+            gradientDirectionSvg,
+            gradientType = "linear",
+            rectangleDimension = 'x="0" y="0" width="1" height="1"',
+            useBase64 = true,
+            renderEnv = {compress: false},
+            returner,
+            directionValue = direction.toCSS(renderEnv),
+            i, color, position, positionValue, alpha;
+
+        switch (directionValue) {
+            case "to bottom":
+                gradientDirectionSvg = 'x1="0%" y1="0%" x2="0%" y2="100%"';
+                break;
+            case "to right":
+                gradientDirectionSvg = 'x1="0%" y1="0%" x2="100%" y2="0%"';
+                break;
+            case "to bottom right":
+                gradientDirectionSvg = 'x1="0%" y1="0%" x2="100%" y2="100%"';
+                break;
+            case "to top right":
+                gradientDirectionSvg = 'x1="0%" y1="100%" x2="100%" y2="0%"';
+                break;
+            case "ellipse":
+            case "ellipse at center":
+                gradientType = "radial";
+                gradientDirectionSvg = 'cx="50%" cy="50%" r="75%"';
+                rectangleDimension = 'x="-50" y="-50" width="101" height="101"';
+                break;
+            default:
+                throw { type: "Argument", message: "svg-gradient direction must be 'to bottom', 'to right', 'to bottom right', 'to top right' or 'ellipse at center'" };
+        }
+        returner = '<?xml version="1.0" ?>' +
+            '<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="100%" height="100%" viewBox="0 0 1 1" preserveAspectRatio="none">' +
+            '<' + gradientType + 'Gradient id="gradient" gradientUnits="userSpaceOnUse" ' + gradientDirectionSvg + '>';
+
+        for (i = 0; i < stops.length; i+= 1) {
+            if (stops[i].value) {
+                color = stops[i].value[0];
+                position = stops[i].value[1];
+            } else {
+                color = stops[i];
+                position = undefined;
+            }
+
+            if (!(color instanceof tree.Color) || (!((i === 0 || i+1 === stops.length) && position === undefined) && !(position instanceof tree.Dimension))) {
+                throwArgumentDescriptor();
+            }
+            positionValue = position ? position.toCSS(renderEnv) : i === 0 ? "0%" : "100%";
+            alpha = color.alpha;
+            returner += '<stop offset="' + positionValue + '" stop-color="' + color.toRGB() + '"' + (alpha < 1 ? ' stop-opacity="' + alpha + '"' : '') + '/>';
+        }
+        returner += '</' + gradientType + 'Gradient>' +
+                    '<rect ' + rectangleDimension + ' fill="url(#gradient)" /></svg>';
+
+        if (useBase64) {
+            try {
+                returner = require('./encoder').encodeBase64(returner); // TODO browser implementation
+            } catch(e) {
+                useBase64 = false;
+            }
+        }
+
+        returner = "'data:image/svg+xml" + (useBase64 ? ";base64" : "") + "," + returner + "'";
+        return new(tree.URL)(new(tree.Anonymous)(returner));
+    }
+};
+
+// these static methods are used as a fallback when the optional 'mime' dependency is missing
+tree._mime = {
+    // this map is intentionally incomplete
+    // if you want more, install 'mime' dep
+    _types: {
+        '.htm' : 'text/html',
+        '.html': 'text/html',
+        '.gif' : 'image/gif',
+        '.jpg' : 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png' : 'image/png'
+    },
+    lookup: function (filepath) {
+        var ext = require('path').extname(filepath),
+            type = tree._mime._types[ext];
+        if (type === undefined) {
+            throw new Error('Optional dependency "mime" is required for ' + ext);
+        }
+        return type;
+    },
+    charsets: {
+        lookup: function (type) {
+            // assumes all text types are UTF-8
+            return type && (/^text\//).test(type) ? 'UTF-8' : '';
+        }
+    }
+};
+
+// Math
+
+var mathFunctions = {
+ // name,  unit
+    ceil:  null, 
+    floor: null, 
+    sqrt:  null, 
+    abs:   null,
+    tan:   "", 
+    sin:   "", 
+    cos:   "",
+    atan:  "rad", 
+    asin:  "rad", 
+    acos:  "rad"
+};
+
+function _math(fn, unit, n) {
+    if (!(n instanceof tree.Dimension)) {
+        throw { type: "Argument", message: "argument must be a number" };
+    }
+    if (unit == null) {
+        unit = n.unit;
+    } else {
+        n = n.unify();
+    }
+    return new(tree.Dimension)(fn(parseFloat(n.value)), unit);
+}
+
+// ~ End of Math
+
+// Color Blending
+// ref: http://www.w3.org/TR/compositing-1
+
+function colorBlend(mode, color1, color2) {
+    var ab = color1.alpha, cb, // backdrop
+        as = color2.alpha, cs, // source
+        ar, cr, r = [];        // result
+        
+    ar = as + ab * (1 - as);
+    for (var i = 0; i < 3; i++) {
+        cb = color1.rgb[i] / 255;
+        cs = color2.rgb[i] / 255;
+        cr = mode(cb, cs);
+        if (ar) {
+            cr = (as * cs + ab * (cb 
+                - as * (cb + cs - cr))) / ar;
+        }
+        r[i] = cr * 255;
+    }
+    
+    return new(tree.Color)(r, ar);
+}
+
+var colorBlendMode = {
+    multiply: function(cb, cs) {
+        return cb * cs;
+    },
+    screen: function(cb, cs) {
+        return cb + cs - cb * cs;
+    },   
+    overlay: function(cb, cs) {
+        cb *= 2;
+        return (cb <= 1)
+            ? colorBlendMode.multiply(cb, cs)
+            : colorBlendMode.screen(cb - 1, cs);
+    },
+    softlight: function(cb, cs) {
+        var d = 1, e = cb;
+        if (cs > 0.5) {
+            e = 1;
+            d = (cb > 0.25) ? Math.sqrt(cb)
+                : ((16 * cb - 12) * cb + 4) * cb;
+        }            
+        return cb - (1 - 2 * cs) * e * (d - cb);
+    },
+    hardlight: function(cb, cs) {
+        return colorBlendMode.overlay(cs, cb);
+    },
+    difference: function(cb, cs) {
+        return Math.abs(cb - cs);
+    },
+    exclusion: function(cb, cs) {
+        return cb + cs - 2 * cb * cs;
+    },
+
+    // non-w3c functions:
+    average: function(cb, cs) {
+        return (cb + cs) / 2;
+    },
+    negation: function(cb, cs) {
+        return 1 - Math.abs(cb + cs - 1);
+    }
+};
+
+// ~ End of Color Blending
+
+tree.defaultFunc = {
+    eval: function () {
+        var v = this.value_, e = this.error_;
+        if (e) {
+            throw e;
+        }
+        if (v != null) {
+            return v ? tree.True : tree.False;
+        }
+    },
+    value: function (v) {
+        this.value_ = v;
+    },
+    error: function (e) {
+        this.error_ = e;
+    },
+    reset: function () {
+        this.value_ = this.error_ = null;
+    }
+};
+
+function initFunctions() {
+    var f, tf = tree.functions;
+    
+    // math
+    for (f in mathFunctions) {
+        if (mathFunctions.hasOwnProperty(f)) {
+            tf[f] = _math.bind(null, Math[f], mathFunctions[f]);
+        }
+    }
+    
+    // color blending
+    for (f in colorBlendMode) {
+        if (colorBlendMode.hasOwnProperty(f)) {
+            tf[f] = colorBlend.bind(null, colorBlendMode[f]);
+        }
+    }
+    
+    // default
+    f = tree.defaultFunc;
+    tf["default"] = f.eval.bind(f);
+    
+} initFunctions();
+
+function hsla(color) {
+    return tree.functions.hsla(color.h, color.s, color.l, color.a);
+}
+
+function scaled(n, size) {
+    if (n instanceof tree.Dimension && n.unit.is('%')) {
+        return parseFloat(n.value * size / 100);
+    } else {
+        return number(n);
+    }
+}
+
+function number(n) {
+    if (n instanceof tree.Dimension) {
+        return parseFloat(n.unit.is('%') ? n.value / 100 : n.value);
+    } else if (typeof(n) === 'number') {
+        return n;
+    } else {
+        throw {
+            error: "RuntimeError",
+            message: "color functions take numbers as parameters"
+        };
+    }
+}
+
+function clamp(val) {
+    return Math.min(1, Math.max(0, val));
+}
+
+tree.fround = function(env, value) {
+    var p;
+    if (env && (env.numPrecision != null)) {
+        p = Math.pow(10, env.numPrecision);
+        return Math.round(value * p) / p;
+    } else {
+        return value;
+    }
+};
+
+tree.functionCall = function(env, currentFileInfo) {
+    this.env = env;
+    this.currentFileInfo = currentFileInfo;
+};
+
+tree.functionCall.prototype = tree.functions;
+
+})(require('./tree'));
+
+(function (tree) {
+    tree.colors = {
+        'aliceblue':'#f0f8ff',
+        'antiquewhite':'#faebd7',
+        'aqua':'#00ffff',
+        'aquamarine':'#7fffd4',
+        'azure':'#f0ffff',
+        'beige':'#f5f5dc',
+        'bisque':'#ffe4c4',
+        'black':'#000000',
+        'blanchedalmond':'#ffebcd',
+        'blue':'#0000ff',
+        'blueviolet':'#8a2be2',
+        'brown':'#a52a2a',
+        'burlywood':'#deb887',
+        'cadetblue':'#5f9ea0',
+        'chartreuse':'#7fff00',
+        'chocolate':'#d2691e',
+        'coral':'#ff7f50',
+        'cornflowerblue':'#6495ed',
+        'cornsilk':'#fff8dc',
+        'crimson':'#dc143c',
+        'cyan':'#00ffff',
+        'darkblue':'#00008b',
+        'darkcyan':'#008b8b',
+        'darkgoldenrod':'#b8860b',
+        'darkgray':'#a9a9a9',
+        'darkgrey':'#a9a9a9',
+        'darkgreen':'#006400',
+        'darkkhaki':'#bdb76b',
+        'darkmagenta':'#8b008b',
+        'darkolivegreen':'#556b2f',
+        'darkorange':'#ff8c00',
+        'darkorchid':'#9932cc',
+        'darkred':'#8b0000',
+        'darksalmon':'#e9967a',
+        'darkseagreen':'#8fbc8f',
+        'darkslateblue':'#483d8b',
+        'darkslategray':'#2f4f4f',
+        'darkslategrey':'#2f4f4f',
+        'darkturquoise':'#00ced1',
+        'darkviolet':'#9400d3',
+        'deeppink':'#ff1493',
+        'deepskyblue':'#00bfff',
+        'dimgray':'#696969',
+        'dimgrey':'#696969',
+        'dodgerblue':'#1e90ff',
+        'firebrick':'#b22222',
+        'floralwhite':'#fffaf0',
+        'forestgreen':'#228b22',
+        'fuchsia':'#ff00ff',
+        'gainsboro':'#dcdcdc',
+        'ghostwhite':'#f8f8ff',
+        'gold':'#ffd700',
+        'goldenrod':'#daa520',
+        'gray':'#808080',
+        'grey':'#808080',
+        'green':'#008000',
+        'greenyellow':'#adff2f',
+        'honeydew':'#f0fff0',
+        'hotpink':'#ff69b4',
+        'indianred':'#cd5c5c',
+        'indigo':'#4b0082',
+        'ivory':'#fffff0',
+        'khaki':'#f0e68c',
+        'lavender':'#e6e6fa',
+        'lavenderblush':'#fff0f5',
+        'lawngreen':'#7cfc00',
+        'lemonchiffon':'#fffacd',
+        'lightblue':'#add8e6',
+        'lightcoral':'#f08080',
+        'lightcyan':'#e0ffff',
+        'lightgoldenrodyellow':'#fafad2',
+        'lightgray':'#d3d3d3',
+        'lightgrey':'#d3d3d3',
+        'lightgreen':'#90ee90',
+        'lightpink':'#ffb6c1',
+        'lightsalmon':'#ffa07a',
+        'lightseagreen':'#20b2aa',
+        'lightskyblue':'#87cefa',
+        'lightslategray':'#778899',
+        'lightslategrey':'#778899',
+        'lightsteelblue':'#b0c4de',
+        'lightyellow':'#ffffe0',
+        'lime':'#00ff00',
+        'limegreen':'#32cd32',
+        'linen':'#faf0e6',
+        'magenta':'#ff00ff',
+        'maroon':'#800000',
+        'mediumaquamarine':'#66cdaa',
+        'mediumblue':'#0000cd',
+        'mediumorchid':'#ba55d3',
+        'mediumpurple':'#9370d8',
+        'mediumseagreen':'#3cb371',
+        'mediumslateblue':'#7b68ee',
+        'mediumspringgreen':'#00fa9a',
+        'mediumturquoise':'#48d1cc',
+        'mediumvioletred':'#c71585',
+        'midnightblue':'#191970',
+        'mintcream':'#f5fffa',
+        'mistyrose':'#ffe4e1',
+        'moccasin':'#ffe4b5',
+        'navajowhite':'#ffdead',
+        'navy':'#000080',
+        'oldlace':'#fdf5e6',
+        'olive':'#808000',
+        'olivedrab':'#6b8e23',
+        'orange':'#ffa500',
+        'orangered':'#ff4500',
+        'orchid':'#da70d6',
+        'palegoldenrod':'#eee8aa',
+        'palegreen':'#98fb98',
+        'paleturquoise':'#afeeee',
+        'palevioletred':'#d87093',
+        'papayawhip':'#ffefd5',
+        'peachpuff':'#ffdab9',
+        'peru':'#cd853f',
+        'pink':'#ffc0cb',
+        'plum':'#dda0dd',
+        'powderblue':'#b0e0e6',
+        'purple':'#800080',
+        'red':'#ff0000',
+        'rosybrown':'#bc8f8f',
+        'royalblue':'#4169e1',
+        'saddlebrown':'#8b4513',
+        'salmon':'#fa8072',
+        'sandybrown':'#f4a460',
+        'seagreen':'#2e8b57',
+        'seashell':'#fff5ee',
+        'sienna':'#a0522d',
+        'silver':'#c0c0c0',
+        'skyblue':'#87ceeb',
+        'slateblue':'#6a5acd',
+        'slategray':'#708090',
+        'slategrey':'#708090',
+        'snow':'#fffafa',
+        'springgreen':'#00ff7f',
+        'steelblue':'#4682b4',
+        'tan':'#d2b48c',
+        'teal':'#008080',
+        'thistle':'#d8bfd8',
+        'tomato':'#ff6347',
+        'turquoise':'#40e0d0',
+        'violet':'#ee82ee',
+        'wheat':'#f5deb3',
+        'white':'#ffffff',
+        'whitesmoke':'#f5f5f5',
+        'yellow':'#ffff00',
+        'yellowgreen':'#9acd32'
+    };
+})(require('./tree'));
+
+(function (tree) {
+
+tree.debugInfo = function(env, ctx, lineSeperator) {
+    var result="";
+    if (env.dumpLineNumbers && !env.compress) {
+        switch(env.dumpLineNumbers) {
+            case 'comments':
+                result = tree.debugInfo.asComment(ctx);
+                break;
+            case 'mediaquery':
+                result = tree.debugInfo.asMediaQuery(ctx);
+                break;
+            case 'all':
+                result = tree.debugInfo.asComment(ctx) + (lineSeperator || "") + tree.debugInfo.asMediaQuery(ctx);
+                break;
+        }
+    }
+    return result;
+};
+
+tree.debugInfo.asComment = function(ctx) {
+    return '/* line ' + ctx.debugInfo.lineNumber + ', ' + ctx.debugInfo.fileName + ' */\n';
+};
+
+tree.debugInfo.asMediaQuery = function(ctx) {
+    return '@media -sass-debug-info{filename{font-family:' +
+        ('file://' + ctx.debugInfo.fileName).replace(/([.:\/\\])/g, function (a) {
+            if (a == '\\') {
+                a = '\/';
+            }
+            return '\\' + a;
+        }) +
+        '}line{font-family:\\00003' + ctx.debugInfo.lineNumber + '}}\n';
+};
+
+tree.find = function (obj, fun) {
+    for (var i = 0, r; i < obj.length; i++) {
+        r = fun.call(obj, obj[i]);
+        if (r) { return r; }
+    }
+    return null;
+};
+
+tree.jsify = function (obj) {
+    if (Array.isArray(obj.value) && (obj.value.length > 1)) {
+        return '[' + obj.value.map(function (v) { return v.toCSS(false); }).join(', ') + ']';
+    } else {
+        return obj.toCSS(false);
+    }
+};
+
+tree.toCSS = function (env) {
+    var strs = [];
+    this.genCSS(env, {
+        add: function(chunk, fileInfo, index) {
+            strs.push(chunk);
+        },
+        isEmpty: function () {
+            return strs.length === 0;
+        }
+    });
+    return strs.join('');
+};
+
+tree.outputRuleset = function (env, output, rules) {
+    var ruleCnt = rules.length, i;
+    env.tabLevel = (env.tabLevel | 0) + 1;
+
+    // Compressed
+    if (env.compress) {
+        output.add('{');
+        for (i = 0; i < ruleCnt; i++) {
+            rules[i].genCSS(env, output);
+        }
+        output.add('}');
+        env.tabLevel--;
+        return;
+    }
+
+    // Non-compressed
+    var tabSetStr = '\n' + Array(env.tabLevel).join("  "), tabRuleStr = tabSetStr + "  ";
+    if (!ruleCnt) {
+        output.add(" {" + tabSetStr + '}');
+    } else {
+        output.add(" {" + tabRuleStr);
+        rules[0].genCSS(env, output);
+        for (i = 1; i < ruleCnt; i++) {
+            output.add(tabRuleStr);
+            rules[i].genCSS(env, output);
+        }
+        output.add(tabSetStr + '}');
+    }
+
+    env.tabLevel--;
+};
+
+})(require('./tree'));
+
+(function (tree) {
+
+tree.Alpha = function (val) {
+    this.value = val;
+};
+tree.Alpha.prototype = {
+    type: "Alpha",
+    accept: function (visitor) {
+        this.value = visitor.visit(this.value);
+    },
+    eval: function (env) {
+        if (this.value.eval) { return new tree.Alpha(this.value.eval(env)); }
+        return this;
+    },
+    genCSS: function (env, output) {
+        output.add("alpha(opacity=");
+
+        if (this.value.genCSS) {
+            this.value.genCSS(env, output);
+        } else {
+            output.add(this.value);
+        }
+
+        output.add(")");
+    },
+    toCSS: tree.toCSS
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Anonymous = function (string, index, currentFileInfo, mapLines) {
+    this.value = string.value || string;
+    this.index = index;
+    this.mapLines = mapLines;
+    this.currentFileInfo = currentFileInfo;
+};
+tree.Anonymous.prototype = {
+    type: "Anonymous",
+    eval: function () { 
+        return new tree.Anonymous(this.value, this.index, this.currentFileInfo, this.mapLines);
+    },
+    compare: function (x) {
+        if (!x.toCSS) {
+            return -1;
+        }
+        
+        var left = this.toCSS(),
+            right = x.toCSS();
+        
+        if (left === right) {
+            return 0;
+        }
+        
+        return left < right ? -1 : 1;
+    },
+    genCSS: function (env, output) {
+        output.add(this.value, this.currentFileInfo, this.index, this.mapLines);
+    },
+    toCSS: tree.toCSS
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Assignment = function (key, val) {
+    this.key = key;
+    this.value = val;
+};
+tree.Assignment.prototype = {
+    type: "Assignment",
+    accept: function (visitor) {
+        this.value = visitor.visit(this.value);
+    },
+    eval: function (env) {
+        if (this.value.eval) {
+            return new(tree.Assignment)(this.key, this.value.eval(env));
+        }
+        return this;
+    },
+    genCSS: function (env, output) {
+        output.add(this.key + '=');
+        if (this.value.genCSS) {
+            this.value.genCSS(env, output);
+        } else {
+            output.add(this.value);
+        }
+    },
+    toCSS: tree.toCSS
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+//
+// A function call node.
+//
+tree.Call = function (name, args, index, currentFileInfo) {
+    this.name = name;
+    this.args = args;
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+};
+tree.Call.prototype = {
+    type: "Call",
+    accept: function (visitor) {
+        if (this.args) {
+            this.args = visitor.visitArray(this.args);
+        }
+    },
+    //
+    // When evaluating a function call,
+    // we either find the function in `tree.functions` [1],
+    // in which case we call it, passing the  evaluated arguments,
+    // if this returns null or we cannot find the function, we 
+    // simply print it out as it appeared originally [2].
+    //
+    // The *functions.js* file contains the built-in functions.
+    //
+    // The reason why we evaluate the arguments, is in the case where
+    // we try to pass a variable to a function, like: `saturate(@color)`.
+    // The function should receive the value, not the variable.
+    //
+    eval: function (env) {
+        var args = this.args.map(function (a) { return a.eval(env); }),
+            nameLC = this.name.toLowerCase(),
+            result, func;
+
+        if (nameLC in tree.functions) { // 1.
+            try {
+                func = new tree.functionCall(env, this.currentFileInfo);
+                result = func[nameLC].apply(func, args);
+                if (result != null) {
+                    return result;
+                }
+            } catch (e) {
+                throw { type: e.type || "Runtime",
+                        message: "error evaluating function `" + this.name + "`" +
+                                 (e.message ? ': ' + e.message : ''),
+                        index: this.index, filename: this.currentFileInfo.filename };
+            }
+        }
+
+        return new tree.Call(this.name, args, this.index, this.currentFileInfo);
+    },
+
+    genCSS: function (env, output) {
+        output.add(this.name + "(", this.currentFileInfo, this.index);
+
+        for(var i = 0; i < this.args.length; i++) {
+            this.args[i].genCSS(env, output);
+            if (i + 1 < this.args.length) {
+                output.add(", ");
+            }
+        }
+
+        output.add(")");
+    },
+
+    toCSS: tree.toCSS
+};
+
+})(require('../tree'));
+
+(function (tree) {
+//
+// RGB Colors - #ff0014, #eee
+//
+tree.Color = function (rgb, a) {
+    //
+    // The end goal here, is to parse the arguments
+    // into an integer triplet, such as `128, 255, 0`
+    //
+    // This facilitates operations and conversions.
+    //
+    if (Array.isArray(rgb)) {
+        this.rgb = rgb;
+    } else if (rgb.length == 6) {
+        this.rgb = rgb.match(/.{2}/g).map(function (c) {
+            return parseInt(c, 16);
+        });
+    } else {
+        this.rgb = rgb.split('').map(function (c) {
+            return parseInt(c + c, 16);
+        });
+    }
+    this.alpha = typeof(a) === 'number' ? a : 1;
+};
+
+var transparentKeyword = "transparent";
+
+tree.Color.prototype = {
+    type: "Color",
+    eval: function () { return this; },
+    luma: function () {
+        var r = this.rgb[0] / 255,
+            g = this.rgb[1] / 255,
+            b = this.rgb[2] / 255;
+
+        r = (r <= 0.03928) ? r / 12.92 : Math.pow(((r + 0.055) / 1.055), 2.4);
+        g = (g <= 0.03928) ? g / 12.92 : Math.pow(((g + 0.055) / 1.055), 2.4);
+        b = (b <= 0.03928) ? b / 12.92 : Math.pow(((b + 0.055) / 1.055), 2.4);
+
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    },
+
+    genCSS: function (env, output) {
+        output.add(this.toCSS(env));
+    },
+    toCSS: function (env, doNotCompress) {
+        var compress = env && env.compress && !doNotCompress,
+            alpha = tree.fround(env, this.alpha);
+
+        // If we have some transparency, the only way to represent it
+        // is via `rgba`. Otherwise, we use the hex representation,
+        // which has better compatibility with older browsers.
+        // Values are capped between `0` and `255`, rounded and zero-padded.
+        if (alpha < 1) {
+            if (alpha === 0 && this.isTransparentKeyword) {
+                return transparentKeyword;
+            }
+            return "rgba(" + this.rgb.map(function (c) {
+                return clamp(Math.round(c), 255);
+            }).concat(clamp(alpha, 1))
+                .join(',' + (compress ? '' : ' ')) + ")";
+        } else {
+            var color = this.toRGB();
+
+            if (compress) {
+                var splitcolor = color.split('');
+
+                // Convert color to short format
+                if (splitcolor[1] === splitcolor[2] && splitcolor[3] === splitcolor[4] && splitcolor[5] === splitcolor[6]) {
+                    color = '#' + splitcolor[1] + splitcolor[3] + splitcolor[5];
+                }
+            }
+
+            return color;
+        }
+    },
+
+    //
+    // Operations have to be done per-channel, if not,
+    // channels will spill onto each other. Once we have
+    // our result, in the form of an integer triplet,
+    // we create a new Color node to hold the result.
+    //
+    operate: function (env, op, other) {
+        var rgb = [];
+        var alpha = this.alpha * (1 - other.alpha) + other.alpha;
+        for (var c = 0; c < 3; c++) {
+            rgb[c] = tree.operate(env, op, this.rgb[c], other.rgb[c]);
+        }
+        return new(tree.Color)(rgb, alpha);
+    },
+
+    toRGB: function () {
+        return toHex(this.rgb);
+    },
+
+    toHSL: function () {
+        var r = this.rgb[0] / 255,
+            g = this.rgb[1] / 255,
+            b = this.rgb[2] / 255,
+            a = this.alpha;
+
+        var max = Math.max(r, g, b), min = Math.min(r, g, b);
+        var h, s, l = (max + min) / 2, d = max - min;
+
+        if (max === min) {
+            h = s = 0;
+        } else {
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+
+            switch (max) {
+                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                case g: h = (b - r) / d + 2;               break;
+                case b: h = (r - g) / d + 4;               break;
+            }
+            h /= 6;
+        }
+        return { h: h * 360, s: s, l: l, a: a };
+    },
+    //Adapted from http://mjijackson.com/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript
+    toHSV: function () {
+        var r = this.rgb[0] / 255,
+            g = this.rgb[1] / 255,
+            b = this.rgb[2] / 255,
+            a = this.alpha;
+
+        var max = Math.max(r, g, b), min = Math.min(r, g, b);
+        var h, s, v = max;
+
+        var d = max - min;
+        if (max === 0) {
+            s = 0;
+        } else {
+            s = d / max;
+        }
+
+        if (max === min) {
+            h = 0;
+        } else {
+            switch(max){
+                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                case g: h = (b - r) / d + 2; break;
+                case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+        }
+        return { h: h * 360, s: s, v: v, a: a };
+    },
+    toARGB: function () {
+        return toHex([this.alpha * 255].concat(this.rgb));
+    },
+    compare: function (x) {
+        if (!x.rgb) {
+            return -1;
+        }
+        
+        return (x.rgb[0] === this.rgb[0] &&
+            x.rgb[1] === this.rgb[1] &&
+            x.rgb[2] === this.rgb[2] &&
+            x.alpha === this.alpha) ? 0 : -1;
+    }
+};
+
+tree.Color.fromKeyword = function(keyword) {
+    keyword = keyword.toLowerCase();
+
+    if (tree.colors.hasOwnProperty(keyword)) {
+        // detect named color
+        return new(tree.Color)(tree.colors[keyword].slice(1));
+    }
+    if (keyword === transparentKeyword) {
+        var transparent = new(tree.Color)([0, 0, 0], 0);
+        transparent.isTransparentKeyword = true;
+        return transparent;
+    }
+};
+
+function toHex(v) {
+    return '#' + v.map(function (c) {
+        c = clamp(Math.round(c), 255);
+        return (c < 16 ? '0' : '') + c.toString(16);
+    }).join('');
+}
+
+function clamp(v, max) {
+    return Math.min(Math.max(v, 0), max); 
+}
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Comment = function (value, silent, index, currentFileInfo) {
+    this.value = value;
+    this.silent = !!silent;
+    this.currentFileInfo = currentFileInfo;
+};
+tree.Comment.prototype = {
+    type: "Comment",
+    genCSS: function (env, output) {
+        if (this.debugInfo) {
+            output.add(tree.debugInfo(env, this), this.currentFileInfo, this.index);
+        }
+        output.add(this.value.trim()); //TODO shouldn't need to trim, we shouldn't grab the \n
+    },
+    toCSS: tree.toCSS,
+    isSilent: function(env) {
+        var isReference = (this.currentFileInfo && this.currentFileInfo.reference && !this.isReferenced),
+            isCompressed = env.compress && !this.value.match(/^\/\*!/);
+        return this.silent || isReference || isCompressed;
+    },
+    eval: function () { return this; },
+    markReferenced: function () {
+        this.isReferenced = true;
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Condition = function (op, l, r, i, negate) {
+    this.op = op.trim();
+    this.lvalue = l;
+    this.rvalue = r;
+    this.index = i;
+    this.negate = negate;
+};
+tree.Condition.prototype = {
+    type: "Condition",
+    accept: function (visitor) {
+        this.lvalue = visitor.visit(this.lvalue);
+        this.rvalue = visitor.visit(this.rvalue);
+    },
+    eval: function (env) {
+        var a = this.lvalue.eval(env),
+            b = this.rvalue.eval(env);
+
+        var i = this.index, result;
+
+        result = (function (op) {
+            switch (op) {
+                case 'and':
+                    return a && b;
+                case 'or':
+                    return a || b;
+                default:
+                    if (a.compare) {
+                        result = a.compare(b);
+                    } else if (b.compare) {
+                        result = b.compare(a);
+                    } else {
+                        throw { type: "Type",
+                                message: "Unable to perform comparison",
+                                index: i };
+                    }
+                    switch (result) {
+                        case -1: return op === '<' || op === '=<' || op === '<=';
+                        case  0: return op === '=' || op === '>=' || op === '=<' || op === '<=';
+                        case  1: return op === '>' || op === '>=';
+                    }
+            }
+        })(this.op);
+        return this.negate ? !result : result;
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.DetachedRuleset = function (ruleset, frames) {
+    this.ruleset = ruleset;
+    this.frames = frames;
+};
+tree.DetachedRuleset.prototype = {
+    type: "DetachedRuleset",
+    accept: function (visitor) {
+        this.ruleset = visitor.visit(this.ruleset);
+    },
+    eval: function (env) {
+        var frames = this.frames || env.frames.slice(0);
+        return new tree.DetachedRuleset(this.ruleset, frames);
+    },
+    callEval: function (env) {
+        return this.ruleset.eval(this.frames ? new(tree.evalEnv)(env, this.frames.concat(env.frames)) : env);
+    }
+};
+})(require('../tree'));
+
+(function (tree) {
+
+//
+// A number with a unit
+//
+tree.Dimension = function (value, unit) {
+    this.value = parseFloat(value);
+    this.unit = (unit && unit instanceof tree.Unit) ? unit :
+      new(tree.Unit)(unit ? [unit] : undefined);
+};
+
+tree.Dimension.prototype = {
+    type: "Dimension",
+    accept: function (visitor) {
+        this.unit = visitor.visit(this.unit);
+    },
+    eval: function (env) {
+        return this;
+    },
+    toColor: function () {
+        return new(tree.Color)([this.value, this.value, this.value]);
+    },
+    genCSS: function (env, output) {
+        if ((env && env.strictUnits) && !this.unit.isSingular()) {
+            throw new Error("Multiple units in dimension. Correct the units or use the unit function. Bad unit: "+this.unit.toString());
+        }
+
+        var value = tree.fround(env, this.value),
+            strValue = String(value);
+
+        if (value !== 0 && value < 0.000001 && value > -0.000001) {
+            // would be output 1e-6 etc.
+            strValue = value.toFixed(20).replace(/0+$/, "");
+        }
+
+        if (env && env.compress) {
+            // Zero values doesn't need a unit
+            if (value === 0 && this.unit.isLength()) {
+                output.add(strValue);
+                return;
+            }
+
+            // Float values doesn't need a leading zero
+            if (value > 0 && value < 1) {
+                strValue = (strValue).substr(1);
+            }
+        }
+
+        output.add(strValue);
+        this.unit.genCSS(env, output);
+    },
+    toCSS: tree.toCSS,
+
+    // In an operation between two Dimensions,
+    // we default to the first Dimension's unit,
+    // so `1px + 2` will yield `3px`.
+    operate: function (env, op, other) {
+        /*jshint noempty:false */
+        var value = tree.operate(env, op, this.value, other.value),
+            unit = this.unit.clone();
+
+        if (op === '+' || op === '-') {
+            if (unit.numerator.length === 0 && unit.denominator.length === 0) {
+                unit.numerator = other.unit.numerator.slice(0);
+                unit.denominator = other.unit.denominator.slice(0);
+            } else if (other.unit.numerator.length === 0 && unit.denominator.length === 0) {
+                // do nothing
+            } else {
+                other = other.convertTo(this.unit.usedUnits());
+
+                if(env.strictUnits && other.unit.toString() !== unit.toString()) {
+                  throw new Error("Incompatible units. Change the units or use the unit function. Bad units: '" + unit.toString() +
+                    "' and '" + other.unit.toString() + "'.");
+                }
+
+                value = tree.operate(env, op, this.value, other.value);
+            }
+        } else if (op === '*') {
+            unit.numerator = unit.numerator.concat(other.unit.numerator).sort();
+            unit.denominator = unit.denominator.concat(other.unit.denominator).sort();
+            unit.cancel();
+        } else if (op === '/') {
+            unit.numerator = unit.numerator.concat(other.unit.denominator).sort();
+            unit.denominator = unit.denominator.concat(other.unit.numerator).sort();
+            unit.cancel();
+        }
+        return new(tree.Dimension)(value, unit);
+    },
+
+    compare: function (other) {
+        if (other instanceof tree.Dimension) {
+            var a, b,
+                aValue, bValue;
+            
+            if (this.unit.isEmpty() || other.unit.isEmpty()) {
+                a = this;
+                b = other;
+            } else {
+                a = this.unify();
+                b = other.unify();
+                if (a.unit.compare(b.unit) !== 0) {
+                    return -1;
+                }                
+            }
+            aValue = a.value;
+            bValue = b.value;
+
+            if (bValue > aValue) {
+                return -1;
+            } else if (bValue < aValue) {
+                return 1;
+            } else {
+                return 0;
+            }
+        } else {
+            return -1;
+        }
+    },
+
+    unify: function () {
+        return this.convertTo({ length: 'px', duration: 's', angle: 'rad' });
+    },
+
+    convertTo: function (conversions) {
+        var value = this.value, unit = this.unit.clone(),
+            i, groupName, group, targetUnit, derivedConversions = {}, applyUnit;
+
+        if (typeof conversions === 'string') {
+            for(i in tree.UnitConversions) {
+                if (tree.UnitConversions[i].hasOwnProperty(conversions)) {
+                    derivedConversions = {};
+                    derivedConversions[i] = conversions;
+                }
+            }
+            conversions = derivedConversions;
+        }
+        applyUnit = function (atomicUnit, denominator) {
+          /*jshint loopfunc:true */
+            if (group.hasOwnProperty(atomicUnit)) {
+                if (denominator) {
+                    value = value / (group[atomicUnit] / group[targetUnit]);
+                } else {
+                    value = value * (group[atomicUnit] / group[targetUnit]);
+                }
+
+                return targetUnit;
+            }
+
+            return atomicUnit;
+        };
+
+        for (groupName in conversions) {
+            if (conversions.hasOwnProperty(groupName)) {
+                targetUnit = conversions[groupName];
+                group = tree.UnitConversions[groupName];
+
+                unit.map(applyUnit);
+            }
+        }
+
+        unit.cancel();
+
+        return new(tree.Dimension)(value, unit);
+    }
+};
+
+// http://www.w3.org/TR/css3-values/#absolute-lengths
+tree.UnitConversions = {
+    length: {
+         'm': 1,
+        'cm': 0.01,
+        'mm': 0.001,
+        'in': 0.0254,
+        'px': 0.0254 / 96,
+        'pt': 0.0254 / 72,
+        'pc': 0.0254 / 72 * 12
+    },
+    duration: {
+        's': 1,
+        'ms': 0.001
+    },
+    angle: {
+        'rad': 1/(2*Math.PI),
+        'deg': 1/360,
+        'grad': 1/400,
+        'turn': 1
+    }
+};
+
+tree.Unit = function (numerator, denominator, backupUnit) {
+    this.numerator = numerator ? numerator.slice(0).sort() : [];
+    this.denominator = denominator ? denominator.slice(0).sort() : [];
+    this.backupUnit = backupUnit;
+};
+
+tree.Unit.prototype = {
+    type: "Unit",
+    clone: function () {
+        return new tree.Unit(this.numerator.slice(0), this.denominator.slice(0), this.backupUnit);
+    },
+    genCSS: function (env, output) {
+        if (this.numerator.length >= 1) {
+            output.add(this.numerator[0]);
+        } else
+        if (this.denominator.length >= 1) {
+            output.add(this.denominator[0]);
+        } else
+        if ((!env || !env.strictUnits) && this.backupUnit) {
+            output.add(this.backupUnit);
+        }
+    },
+    toCSS: tree.toCSS,
+
+    toString: function () {
+      var i, returnStr = this.numerator.join("*");
+      for (i = 0; i < this.denominator.length; i++) {
+          returnStr += "/" + this.denominator[i];
+      }
+      return returnStr;
+    },
+
+    compare: function (other) {
+        return this.is(other.toString()) ? 0 : -1;
+    },
+
+    is: function (unitString) {
+        return this.toString() === unitString;
+    },
+
+    isLength: function () {
+        return Boolean(this.toCSS().match(/px|em|%|in|cm|mm|pc|pt|ex/));
+    },
+
+    isEmpty: function () {
+        return this.numerator.length === 0 && this.denominator.length === 0;
+    },
+
+    isSingular: function() {
+        return this.numerator.length <= 1 && this.denominator.length === 0;
+    },
+
+    map: function(callback) {
+        var i;
+
+        for (i = 0; i < this.numerator.length; i++) {
+            this.numerator[i] = callback(this.numerator[i], false);
+        }
+
+        for (i = 0; i < this.denominator.length; i++) {
+            this.denominator[i] = callback(this.denominator[i], true);
+        }
+    },
+
+    usedUnits: function() {
+        var group, result = {}, mapUnit;
+
+        mapUnit = function (atomicUnit) {
+        /*jshint loopfunc:true */
+            if (group.hasOwnProperty(atomicUnit) && !result[groupName]) {
+                result[groupName] = atomicUnit;
+            }
+
+            return atomicUnit;
+        };
+
+        for (var groupName in tree.UnitConversions) {
+            if (tree.UnitConversions.hasOwnProperty(groupName)) {
+                group = tree.UnitConversions[groupName];
+
+                this.map(mapUnit);
+            }
+        }
+
+        return result;
+    },
+
+    cancel: function () {
+        var counter = {}, atomicUnit, i, backup;
+
+        for (i = 0; i < this.numerator.length; i++) {
+            atomicUnit = this.numerator[i];
+            if (!backup) {
+                backup = atomicUnit;
+            }
+            counter[atomicUnit] = (counter[atomicUnit] || 0) + 1;
+        }
+
+        for (i = 0; i < this.denominator.length; i++) {
+            atomicUnit = this.denominator[i];
+            if (!backup) {
+                backup = atomicUnit;
+            }
+            counter[atomicUnit] = (counter[atomicUnit] || 0) - 1;
+        }
+
+        this.numerator = [];
+        this.denominator = [];
+
+        for (atomicUnit in counter) {
+            if (counter.hasOwnProperty(atomicUnit)) {
+                var count = counter[atomicUnit];
+
+                if (count > 0) {
+                    for (i = 0; i < count; i++) {
+                        this.numerator.push(atomicUnit);
+                    }
+                } else if (count < 0) {
+                    for (i = 0; i < -count; i++) {
+                        this.denominator.push(atomicUnit);
+                    }
+                }
+            }
+        }
+
+        if (this.numerator.length === 0 && this.denominator.length === 0 && backup) {
+            this.backupUnit = backup;
+        }
+
+        this.numerator.sort();
+        this.denominator.sort();
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Directive = function (name, value, rules, index, currentFileInfo, debugInfo) {
+    this.name  = name;
+    this.value = value;
+    if (rules) {
+        this.rules = rules;
+        this.rules.allowImports = true;
+    }
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+    this.debugInfo = debugInfo;
+};
+
+tree.Directive.prototype = {
+    type: "Directive",
+    accept: function (visitor) {
+        var value = this.value, rules = this.rules;
+        if (rules) {
+            rules = visitor.visit(rules);
+        }
+        if (value) {
+            value = visitor.visit(value);
+        }
+    },
+    genCSS: function (env, output) {
+        var value = this.value, rules = this.rules;
+        output.add(this.name, this.currentFileInfo, this.index);
+        if (value) {
+            output.add(' ');
+            value.genCSS(env, output);
+        }
+        if (rules) {
+            tree.outputRuleset(env, output, [rules]);
+        } else {
+            output.add(';');
+        }
+    },
+    toCSS: tree.toCSS,
+    eval: function (env) {
+        var value = this.value, rules = this.rules;
+        if (value) {
+            value = value.eval(env);
+        }
+        if (rules) {
+            rules = rules.eval(env);
+            rules.root = true;
+        }
+        return new(tree.Directive)(this.name, value, rules,
+            this.index, this.currentFileInfo, this.debugInfo);
+    },
+    variable: function (name) { if (this.rules) return tree.Ruleset.prototype.variable.call(this.rules, name); },
+    find: function () { if (this.rules) return tree.Ruleset.prototype.find.apply(this.rules, arguments); },
+    rulesets: function () { if (this.rules) return tree.Ruleset.prototype.rulesets.apply(this.rules); },
+    markReferenced: function () {
+        var i, rules;
+        this.isReferenced = true;
+        if (this.rules) {
+            rules = this.rules.rules;
+            for (i = 0; i < rules.length; i++) {
+                if (rules[i].markReferenced) {
+                    rules[i].markReferenced();
+                }
+            }
+        }
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Element = function (combinator, value, index, currentFileInfo) {
+    this.combinator = combinator instanceof tree.Combinator ?
+                      combinator : new(tree.Combinator)(combinator);
+
+    if (typeof(value) === 'string') {
+        this.value = value.trim();
+    } else if (value) {
+        this.value = value;
+    } else {
+        this.value = "";
+    }
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+};
+tree.Element.prototype = {
+    type: "Element",
+    accept: function (visitor) {
+        var value = this.value;
+        this.combinator = visitor.visit(this.combinator);
+        if (typeof value === "object") {
+            this.value = visitor.visit(value);
+        }
+    },
+    eval: function (env) {
+        return new(tree.Element)(this.combinator,
+                                 this.value.eval ? this.value.eval(env) : this.value,
+                                 this.index,
+                                 this.currentFileInfo);
+    },
+    genCSS: function (env, output) {
+        output.add(this.toCSS(env), this.currentFileInfo, this.index);
+    },
+    toCSS: function (env) {
+        var value = (this.value.toCSS ? this.value.toCSS(env) : this.value);
+        if (value === '' && this.combinator.value.charAt(0) === '&') {
+            return '';
+        } else {
+            return this.combinator.toCSS(env || {}) + value;
+        }
+    }
+};
+
+tree.Attribute = function (key, op, value) {
+    this.key = key;
+    this.op = op;
+    this.value = value;
+};
+tree.Attribute.prototype = {
+    type: "Attribute",
+    eval: function (env) {
+        return new(tree.Attribute)(this.key.eval ? this.key.eval(env) : this.key,
+            this.op, (this.value && this.value.eval) ? this.value.eval(env) : this.value);
+    },
+    genCSS: function (env, output) {
+        output.add(this.toCSS(env));
+    },
+    toCSS: function (env) {
+        var value = this.key.toCSS ? this.key.toCSS(env) : this.key;
+
+        if (this.op) {
+            value += this.op;
+            value += (this.value.toCSS ? this.value.toCSS(env) : this.value);
+        }
+
+        return '[' + value + ']';
+    }
+};
+
+tree.Combinator = function (value) {
+    if (value === ' ') {
+        this.value = ' ';
+    } else {
+        this.value = value ? value.trim() : "";
+    }
+};
+tree.Combinator.prototype = {
+    type: "Combinator",
+    _outputMap: {
+        ''  : '',
+        ' ' : ' ',
+        ':' : ' :',
+        '+' : ' + ',
+        '~' : ' ~ ',
+        '>' : ' > ',
+        '|' : '|',
+        '^' : ' ^ ',
+        '^^' : ' ^^ '
+    },
+    _outputMapCompressed: {
+        ''  : '',
+        ' ' : ' ',
+        ':' : ' :',
+        '+' : '+',
+        '~' : '~',
+        '>' : '>',
+        '|' : '|',
+        '^' : '^',
+        '^^' : '^^'
+    },
+    genCSS: function (env, output) {
+        output.add((env.compress ? this._outputMapCompressed : this._outputMap)[this.value]);
+    },
+    toCSS: tree.toCSS
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Expression = function (value) { this.value = value; };
+tree.Expression.prototype = {
+    type: "Expression",
+    accept: function (visitor) {
+        if (this.value) {
+            this.value = visitor.visitArray(this.value);
+        }
+    },
+    eval: function (env) {
+        var returnValue,
+            inParenthesis = this.parens && !this.parensInOp,
+            doubleParen = false;
+        if (inParenthesis) {
+            env.inParenthesis();
+        }
+        if (this.value.length > 1) {
+            returnValue = new(tree.Expression)(this.value.map(function (e) {
+                return e.eval(env);
+            }));
+        } else if (this.value.length === 1) {
+            if (this.value[0].parens && !this.value[0].parensInOp) {
+                doubleParen = true;
+            }
+            returnValue = this.value[0].eval(env);
+        } else {
+            returnValue = this;
+        }
+        if (inParenthesis) {
+            env.outOfParenthesis();
+        }
+        if (this.parens && this.parensInOp && !(env.isMathOn()) && !doubleParen) {
+            returnValue = new(tree.Paren)(returnValue);
+        }
+        return returnValue;
+    },
+    genCSS: function (env, output) {
+        for(var i = 0; i < this.value.length; i++) {
+            this.value[i].genCSS(env, output);
+            if (i + 1 < this.value.length) {
+                output.add(" ");
+            }
+        }
+    },
+    toCSS: tree.toCSS,
+    throwAwayComments: function () {
+        this.value = this.value.filter(function(v) {
+            return !(v instanceof tree.Comment);
+        });
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Extend = function Extend(selector, option, index) {
+    this.selector = selector;
+    this.option = option;
+    this.index = index;
+    this.object_id = tree.Extend.next_id++;
+    this.parent_ids = [this.object_id];
+
+    switch(option) {
+        case "all":
+            this.allowBefore = true;
+            this.allowAfter = true;
+        break;
+        default:
+            this.allowBefore = false;
+            this.allowAfter = false;
+        break;
+    }
+};
+tree.Extend.next_id = 0;
+
+tree.Extend.prototype = {
+    type: "Extend",
+    accept: function (visitor) {
+        this.selector = visitor.visit(this.selector);
+    },
+    eval: function (env) {
+        return new(tree.Extend)(this.selector.eval(env), this.option, this.index);
+    },
+    clone: function (env) {
+        return new(tree.Extend)(this.selector, this.option, this.index);
+    },
+    findSelfSelectors: function (selectors) {
+        var selfElements = [],
+            i,
+            selectorElements;
+
+        for(i = 0; i < selectors.length; i++) {
+            selectorElements = selectors[i].elements;
+            // duplicate the logic in genCSS function inside the selector node.
+            // future TODO - move both logics into the selector joiner visitor
+            if (i > 0 && selectorElements.length && selectorElements[0].combinator.value === "") {
+                selectorElements[0].combinator.value = ' ';
+            }
+            selfElements = selfElements.concat(selectors[i].elements);
+        }
+
+        this.selfSelectors = [{ elements: selfElements }];
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+//
+// CSS @import node
+//
+// The general strategy here is that we don't want to wait
+// for the parsing to be completed, before we start importing
+// the file. That's because in the context of a browser,
+// most of the time will be spent waiting for the server to respond.
+//
+// On creation, we push the import path to our import queue, though
+// `import,push`, we also pass it a callback, which it'll call once
+// the file has been fetched, and parsed.
+//
+tree.Import = function (path, features, options, index, currentFileInfo) {
+    this.options = options;
+    this.index = index;
+    this.path = path;
+    this.features = features;
+    this.currentFileInfo = currentFileInfo;
+
+    if (this.options.less !== undefined || this.options.inline) {
+        this.css = !this.options.less || this.options.inline;
+    } else {
+        var pathValue = this.getPath();
+        if (pathValue && /css([\?;].*)?$/.test(pathValue)) {
+            this.css = true;
+        }
+    }
+};
+
+//
+// The actual import node doesn't return anything, when converted to CSS.
+// The reason is that it's used at the evaluation stage, so that the rules
+// it imports can be treated like any other rules.
+//
+// In `eval`, we make sure all Import nodes get evaluated, recursively, so
+// we end up with a flat structure, which can easily be imported in the parent
+// ruleset.
+//
+tree.Import.prototype = {
+    type: "Import",
+    accept: function (visitor) {
+        if (this.features) {
+            this.features = visitor.visit(this.features);
+        }
+        this.path = visitor.visit(this.path);
+        if (!this.options.inline && this.root) {
+            this.root = visitor.visit(this.root);
+        }
+    },
+    genCSS: function (env, output) {
+        if (this.css) {
+            output.add("@import ", this.currentFileInfo, this.index);
+            this.path.genCSS(env, output);
+            if (this.features) {
+                output.add(" ");
+                this.features.genCSS(env, output);
+            }
+            output.add(';');
+        }
+    },
+    toCSS: tree.toCSS,
+    getPath: function () {
+        if (this.path instanceof tree.Quoted) {
+            var path = this.path.value;
+            return (this.css !== undefined || /(\.[a-z]*$)|([\?;].*)$/.test(path)) ? path : path + '.less';
+        } else if (this.path instanceof tree.URL) {
+            return this.path.value.value;
+        }
+        return null;
+    },
+    evalForImport: function (env) {
+        return new(tree.Import)(this.path.eval(env), this.features, this.options, this.index, this.currentFileInfo);
+    },
+    evalPath: function (env) {
+        var path = this.path.eval(env);
+        var rootpath = this.currentFileInfo && this.currentFileInfo.rootpath;
+
+        if (!(path instanceof tree.URL)) {
+            if (rootpath) {
+                var pathValue = path.value;
+                // Add the base path if the import is relative
+                if (pathValue && env.isPathRelative(pathValue)) {
+                    path.value = rootpath +pathValue;
+                }
+            }
+            path.value = env.normalizePath(path.value);
+        }
+
+        return path;
+    },
+    eval: function (env) {
+        var ruleset, features = this.features && this.features.eval(env);
+
+        if (this.skip) {
+            if (typeof this.skip === "function") {
+                this.skip = this.skip();
+            }
+            if (this.skip) {
+                return []; 
+            }
+        }
+         
+        if (this.options.inline) {
+            //todo needs to reference css file not import
+            var contents = new(tree.Anonymous)(this.root, 0, {filename: this.importedFilename}, true);
+            return this.features ? new(tree.Media)([contents], this.features.value) : [contents];
+        } else if (this.css) {
+            var newImport = new(tree.Import)(this.evalPath(env), features, this.options, this.index);
+            if (!newImport.css && this.error) {
+                throw this.error;
+            }
+            return newImport;
+        } else {
+            ruleset = new(tree.Ruleset)(null, this.root.rules.slice(0));
+
+            ruleset.evalImports(env);
+
+            return this.features ? new(tree.Media)(ruleset.rules, this.features.value) : ruleset.rules;
+        }
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.JavaScript = function (string, index, escaped) {
+    this.escaped = escaped;
+    this.expression = string;
+    this.index = index;
+};
+tree.JavaScript.prototype = {
+    type: "JavaScript",
+    eval: function (env) {
+        var result,
+            that = this,
+            context = {};
+
+        var expression = this.expression.replace(/@\{([\w-]+)\}/g, function (_, name) {
+            return tree.jsify(new(tree.Variable)('@' + name, that.index).eval(env));
+        });
+
+        try {
+            expression = new(Function)('return (' + expression + ')');
+        } catch (e) {
+            throw { message: "JavaScript evaluation error: " + e.message + " from `" + expression + "`" ,
+                    index: this.index };
+        }
+
+        var variables = env.frames[0].variables();
+        for (var k in variables) {
+            if (variables.hasOwnProperty(k)) {
+                /*jshint loopfunc:true */
+                context[k.slice(1)] = {
+                    value: variables[k].value,
+                    toJS: function () {
+                        return this.value.eval(env).toCSS();
+                    }
+                };
+            }
+        }
+
+        try {
+            result = expression.call(context);
+        } catch (e) {
+            throw { message: "JavaScript evaluation error: '" + e.name + ': ' + e.message.replace(/["]/g, "'") + "'" ,
+                    index: this.index };
+        }
+        if (typeof(result) === 'number') {
+            return new(tree.Dimension)(result);
+        } else if (typeof(result) === 'string') {
+            return new(tree.Quoted)('"' + result + '"', result, this.escaped, this.index);
+        } else if (Array.isArray(result)) {
+            return new(tree.Anonymous)(result.join(', '));
+        } else {
+            return new(tree.Anonymous)(result);
+        }
+    }
+};
+
+})(require('../tree'));
+
+
+(function (tree) {
+
+tree.Keyword = function (value) { this.value = value; };
+tree.Keyword.prototype = {
+    type: "Keyword",
+    eval: function () { return this; },
+    genCSS: function (env, output) {
+        if (this.value === '%') { throw { type: "Syntax", message: "Invalid % without number" }; }
+        output.add(this.value);
+    },
+    toCSS: tree.toCSS,
+    compare: function (other) {
+        if (other instanceof tree.Keyword) {
+            return other.value === this.value ? 0 : 1;
+        } else {
+            return -1;
+        }
+    }
+};
+
+tree.True = new(tree.Keyword)('true');
+tree.False = new(tree.Keyword)('false');
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Media = function (value, features, index, currentFileInfo) {
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+
+    var selectors = this.emptySelectors();
+
+    this.features = new(tree.Value)(features);
+    this.rules = [new(tree.Ruleset)(selectors, value)];
+    this.rules[0].allowImports = true;
+};
+tree.Media.prototype = {
+    type: "Media",
+    accept: function (visitor) {
+        if (this.features) {
+            this.features = visitor.visit(this.features);
+        }
+        if (this.rules) {
+            this.rules = visitor.visitArray(this.rules);
+        }
+    },
+    genCSS: function (env, output) {
+        output.add('@media ', this.currentFileInfo, this.index);
+        this.features.genCSS(env, output);
+        tree.outputRuleset(env, output, this.rules);
+    },
+    toCSS: tree.toCSS,
+    eval: function (env) {
+        if (!env.mediaBlocks) {
+            env.mediaBlocks = [];
+            env.mediaPath = [];
+        }
+        
+        var media = new(tree.Media)(null, [], this.index, this.currentFileInfo);
+        if(this.debugInfo) {
+            this.rules[0].debugInfo = this.debugInfo;
+            media.debugInfo = this.debugInfo;
+        }
+        var strictMathBypass = false;
+        if (!env.strictMath) {
+            strictMathBypass = true;
+            env.strictMath = true;
+        }
+        try {
+            media.features = this.features.eval(env);
+        }
+        finally {
+            if (strictMathBypass) {
+                env.strictMath = false;
+            }
+        }
+        
+        env.mediaPath.push(media);
+        env.mediaBlocks.push(media);
+        
+        env.frames.unshift(this.rules[0]);
+        media.rules = [this.rules[0].eval(env)];
+        env.frames.shift();
+        
+        env.mediaPath.pop();
+
+        return env.mediaPath.length === 0 ? media.evalTop(env) :
+                    media.evalNested(env);
+    },
+    variable: function (name) { return tree.Ruleset.prototype.variable.call(this.rules[0], name); },
+    find: function () { return tree.Ruleset.prototype.find.apply(this.rules[0], arguments); },
+    rulesets: function () { return tree.Ruleset.prototype.rulesets.apply(this.rules[0]); },
+    emptySelectors: function() { 
+        var el = new(tree.Element)('', '&', this.index, this.currentFileInfo),
+            sels = [new(tree.Selector)([el], null, null, this.index, this.currentFileInfo)];
+        sels[0].mediaEmpty = true;
+        return sels;
+    },
+    markReferenced: function () {
+        var i, rules = this.rules[0].rules;
+        this.rules[0].markReferenced();
+        this.isReferenced = true;
+        for (i = 0; i < rules.length; i++) {
+            if (rules[i].markReferenced) {
+                rules[i].markReferenced();
+            }
+        }
+    },
+
+    evalTop: function (env) {
+        var result = this;
+
+        // Render all dependent Media blocks.
+        if (env.mediaBlocks.length > 1) {
+            var selectors = this.emptySelectors();
+            result = new(tree.Ruleset)(selectors, env.mediaBlocks);
+            result.multiMedia = true;
+        }
+
+        delete env.mediaBlocks;
+        delete env.mediaPath;
+
+        return result;
+    },
+    evalNested: function (env) {
+        var i, value,
+            path = env.mediaPath.concat([this]);
+
+        // Extract the media-query conditions separated with `,` (OR).
+        for (i = 0; i < path.length; i++) {
+            value = path[i].features instanceof tree.Value ?
+                        path[i].features.value : path[i].features;
+            path[i] = Array.isArray(value) ? value : [value];
+        }
+
+        // Trace all permutations to generate the resulting media-query.
+        //
+        // (a, b and c) with nested (d, e) ->
+        //    a and d
+        //    a and e
+        //    b and c and d
+        //    b and c and e
+        this.features = new(tree.Value)(this.permute(path).map(function (path) {
+            path = path.map(function (fragment) {
+                return fragment.toCSS ? fragment : new(tree.Anonymous)(fragment);
+            });
+
+            for(i = path.length - 1; i > 0; i--) {
+                path.splice(i, 0, new(tree.Anonymous)("and"));
+            }
+
+            return new(tree.Expression)(path);
+        }));
+
+        // Fake a tree-node that doesn't output anything.
+        return new(tree.Ruleset)([], []);
+    },
+    permute: function (arr) {
+      if (arr.length === 0) {
+          return [];
+      } else if (arr.length === 1) {
+          return arr[0];
+      } else {
+          var result = [];
+          var rest = this.permute(arr.slice(1));
+          for (var i = 0; i < rest.length; i++) {
+              for (var j = 0; j < arr[0].length; j++) {
+                  result.push([arr[0][j]].concat(rest[i]));
+              }
+          }
+          return result;
+      }
+    },
+    bubbleSelectors: function (selectors) {
+      if (!selectors)
+        return;
+      this.rules = [new(tree.Ruleset)(selectors.slice(0), [this.rules[0]])];
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.mixin = {};
+tree.mixin.Call = function (elements, args, index, currentFileInfo, important) {
+    this.selector = new(tree.Selector)(elements);
+    this.arguments = (args && args.length) ? args : null;
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+    this.important = important;
+};
+tree.mixin.Call.prototype = {
+    type: "MixinCall",
+    accept: function (visitor) {
+        if (this.selector) {
+            this.selector = visitor.visit(this.selector);
+        }
+        if (this.arguments) {
+            this.arguments = visitor.visitArray(this.arguments);
+        }
+    },
+    eval: function (env) {
+        var mixins, mixin, args, rules = [], match = false, i, m, f, isRecursive, isOneFound, rule,
+            candidates = [], candidate, conditionResult = [], defaultFunc = tree.defaultFunc,
+            defaultResult, defNone = 0, defTrue = 1, defFalse = 2, count; 
+
+        args = this.arguments && this.arguments.map(function (a) {
+            return { name: a.name, value: a.value.eval(env) };
+        });
+
+        for (i = 0; i < env.frames.length; i++) {
+            if ((mixins = env.frames[i].find(this.selector)).length > 0) {
+                isOneFound = true;
+                
+                // To make `default()` function independent of definition order we have two "subpasses" here.
+                // At first we evaluate each guard *twice* (with `default() == true` and `default() == false`),
+                // and build candidate list with corresponding flags. Then, when we know all possible matches,
+                // we make a final decision.
+                
+                for (m = 0; m < mixins.length; m++) {
+                    mixin = mixins[m];
+                    isRecursive = false;
+                    for(f = 0; f < env.frames.length; f++) {
+                        if ((!(mixin instanceof tree.mixin.Definition)) && mixin === (env.frames[f].originalRuleset || env.frames[f])) {
+                            isRecursive = true;
+                            break;
+                        }
+                    }
+                    if (isRecursive) {
+                        continue;
+                    }
+                    
+                    if (mixin.matchArgs(args, env)) {  
+                        candidate = {mixin: mixin, group: defNone};
+                        
+                        if (mixin.matchCondition) { 
+                            for (f = 0; f < 2; f++) {
+                                defaultFunc.value(f);
+                                conditionResult[f] = mixin.matchCondition(args, env);
+                            }
+                            if (conditionResult[0] || conditionResult[1]) {
+                                if (conditionResult[0] != conditionResult[1]) {
+                                    candidate.group = conditionResult[1] ?
+                                        defTrue : defFalse;
+                                }
+
+                                candidates.push(candidate);
+                            }   
+                        }
+                        else {
+                            candidates.push(candidate);
+                        }
+                        
+                        match = true;
+                    }
+                }
+                
+                defaultFunc.reset();
+
+                count = [0, 0, 0];
+                for (m = 0; m < candidates.length; m++) {
+                    count[candidates[m].group]++;
+                }
+
+                if (count[defNone] > 0) {
+                    defaultResult = defFalse;
+                } else {
+                    defaultResult = defTrue;
+                    if ((count[defTrue] + count[defFalse]) > 1) {
+                        throw { type: 'Runtime',
+                            message: 'Ambiguous use of `default()` found when matching for `'
+                                + this.format(args) + '`',
+                            index: this.index, filename: this.currentFileInfo.filename };
+                    }
+                }
+                
+                for (m = 0; m < candidates.length; m++) {
+                    candidate = candidates[m].group;
+                    if ((candidate === defNone) || (candidate === defaultResult)) {
+                        try {
+                            mixin = candidates[m].mixin;
+                            if (!(mixin instanceof tree.mixin.Definition)) {
+                                mixin = new tree.mixin.Definition("", [], mixin.rules, null, false);
+                                mixin.originalRuleset = mixins[m].originalRuleset || mixins[m];
+                            }
+                            Array.prototype.push.apply(
+                                  rules, mixin.evalCall(env, args, this.important).rules);
+                        } catch (e) {
+                            throw { message: e.message, index: this.index, filename: this.currentFileInfo.filename, stack: e.stack };
+                        }
+                    }
+                }
+                
+                if (match) {
+                    if (!this.currentFileInfo || !this.currentFileInfo.reference) {
+                        for (i = 0; i < rules.length; i++) {
+                            rule = rules[i];
+                            if (rule.markReferenced) {
+                                rule.markReferenced();
+                            }
+                        }
+                    }
+                    return rules;
+                }
+            }
+        }
+        if (isOneFound) {
+            throw { type:    'Runtime',
+                    message: 'No matching definition was found for `' + this.format(args) + '`',
+                    index:   this.index, filename: this.currentFileInfo.filename };
+        } else {
+            throw { type:    'Name',
+                    message: this.selector.toCSS().trim() + " is undefined",
+                    index:   this.index, filename: this.currentFileInfo.filename };
+        }
+    },
+    format: function (args) {
+        return this.selector.toCSS().trim() + '(' +
+            (args ? args.map(function (a) {
+                var argValue = "";
+                if (a.name) {
+                    argValue += a.name + ":";
+                }
+                if (a.value.toCSS) {
+                    argValue += a.value.toCSS();
+                } else {
+                    argValue += "???";
+                }
+                return argValue;
+            }).join(', ') : "") + ")";
+    }
+};
+
+tree.mixin.Definition = function (name, params, rules, condition, variadic, frames) {
+    this.name = name;
+    this.selectors = [new(tree.Selector)([new(tree.Element)(null, name, this.index, this.currentFileInfo)])];
+    this.params = params;
+    this.condition = condition;
+    this.variadic = variadic;
+    this.arity = params.length;
+    this.rules = rules;
+    this._lookups = {};
+    this.required = params.reduce(function (count, p) {
+        if (!p.name || (p.name && !p.value)) { return count + 1; }
+        else                                 { return count; }
+    }, 0);
+    this.parent = tree.Ruleset.prototype;
+    this.frames = frames;
+};
+tree.mixin.Definition.prototype = {
+    type: "MixinDefinition",
+    accept: function (visitor) {
+        if (this.params && this.params.length) {
+            this.params = visitor.visitArray(this.params);
+        }
+        this.rules = visitor.visitArray(this.rules);
+        if (this.condition) {
+            this.condition = visitor.visit(this.condition);
+        }
+    },
+    variable:  function (name) { return this.parent.variable.call(this, name); },
+    variables: function ()     { return this.parent.variables.call(this); },
+    find:      function ()     { return this.parent.find.apply(this, arguments); },
+    rulesets:  function ()     { return this.parent.rulesets.apply(this); },
+
+    evalParams: function (env, mixinEnv, args, evaldArguments) {
+        /*jshint boss:true */
+        var frame = new(tree.Ruleset)(null, null),
+            varargs, arg,
+            params = this.params.slice(0),
+            i, j, val, name, isNamedFound, argIndex, argsLength = 0;
+
+        mixinEnv = new tree.evalEnv(mixinEnv, [frame].concat(mixinEnv.frames));
+
+        if (args) {
+            args = args.slice(0);
+            argsLength = args.length;
+
+            for(i = 0; i < argsLength; i++) {
+                arg = args[i];
+                if (name = (arg && arg.name)) {
+                    isNamedFound = false;
+                    for(j = 0; j < params.length; j++) {
+                        if (!evaldArguments[j] && name === params[j].name) {
+                            evaldArguments[j] = arg.value.eval(env);
+                            frame.prependRule(new(tree.Rule)(name, arg.value.eval(env)));
+                            isNamedFound = true;
+                            break;
+                        }
+                    }
+                    if (isNamedFound) {
+                        args.splice(i, 1);
+                        i--;
+                        continue;
+                    } else {
+                        throw { type: 'Runtime', message: "Named argument for " + this.name +
+                            ' ' + args[i].name + ' not found' };
+                    }
+                }
+            }
+        }
+        argIndex = 0;
+        for (i = 0; i < params.length; i++) {
+            if (evaldArguments[i]) { continue; }
+
+            arg = args && args[argIndex];
+
+            if (name = params[i].name) {
+                if (params[i].variadic) {
+                    varargs = [];
+                    for (j = argIndex; j < argsLength; j++) {
+                        varargs.push(args[j].value.eval(env));
+                    }
+                    frame.prependRule(new(tree.Rule)(name, new(tree.Expression)(varargs).eval(env)));
+                } else {
+                    val = arg && arg.value;
+                    if (val) {
+                        val = val.eval(env);
+                    } else if (params[i].value) {
+                        val = params[i].value.eval(mixinEnv);
+                        frame.resetCache();
+                    } else {
+                        throw { type: 'Runtime', message: "wrong number of arguments for " + this.name +
+                            ' (' + argsLength + ' for ' + this.arity + ')' };
+                    }
+                    
+                    frame.prependRule(new(tree.Rule)(name, val));
+                    evaldArguments[i] = val;
+                }
+            }
+
+            if (params[i].variadic && args) {
+                for (j = argIndex; j < argsLength; j++) {
+                    evaldArguments[j] = args[j].value.eval(env);
+                }
+            }
+            argIndex++;
+        }
+
+        return frame;
+    },
+    eval: function (env) {
+        return new tree.mixin.Definition(this.name, this.params, this.rules, this.condition, this.variadic, this.frames || env.frames.slice(0));
+    },
+    evalCall: function (env, args, important) {
+        var _arguments = [],
+            mixinFrames = this.frames ? this.frames.concat(env.frames) : env.frames,
+            frame = this.evalParams(env, new(tree.evalEnv)(env, mixinFrames), args, _arguments),
+            rules, ruleset;
+
+        frame.prependRule(new(tree.Rule)('@arguments', new(tree.Expression)(_arguments).eval(env)));
+
+        rules = this.rules.slice(0);
+
+        ruleset = new(tree.Ruleset)(null, rules);
+        ruleset.originalRuleset = this;
+        ruleset = ruleset.eval(new(tree.evalEnv)(env, [this, frame].concat(mixinFrames)));
+        if (important) {
+            ruleset = this.parent.makeImportant.apply(ruleset);
+        }
+        return ruleset;
+    },
+    matchCondition: function (args, env) {
+        if (this.condition && !this.condition.eval(
+            new(tree.evalEnv)(env,
+                [this.evalParams(env, new(tree.evalEnv)(env, this.frames.concat(env.frames)), args, [])] // the parameter variables
+                    .concat(this.frames) // the parent namespace/mixin frames
+                    .concat(env.frames)))) { // the current environment frames
+            return false;
+        }
+        return true;
+    },
+    matchArgs: function (args, env) {
+        var argsLength = (args && args.length) || 0, len;
+
+        if (! this.variadic) {
+            if (argsLength < this.required)                               { return false; }
+            if (argsLength > this.params.length)                          { return false; }
+        } else {
+            if (argsLength < (this.required - 1))                         { return false; }
+        }
+
+        len = Math.min(argsLength, this.arity);
+
+        for (var i = 0; i < len; i++) {
+            if (!this.params[i].name && !this.params[i].variadic) {
+                if (args[i].value.eval(env).toCSS() != this.params[i].value.eval(env).toCSS()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Negative = function (node) {
+    this.value = node;
+};
+tree.Negative.prototype = {
+    type: "Negative",
+    accept: function (visitor) {
+        this.value = visitor.visit(this.value);
+    },
+    genCSS: function (env, output) {
+        output.add('-');
+        this.value.genCSS(env, output);
+    },
+    toCSS: tree.toCSS,
+    eval: function (env) {
+        if (env.isMathOn()) {
+            return (new(tree.Operation)('*', [new(tree.Dimension)(-1), this.value])).eval(env);
+        }
+        return new(tree.Negative)(this.value.eval(env));
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Operation = function (op, operands, isSpaced) {
+    this.op = op.trim();
+    this.operands = operands;
+    this.isSpaced = isSpaced;
+};
+tree.Operation.prototype = {
+    type: "Operation",
+    accept: function (visitor) {
+        this.operands = visitor.visit(this.operands);
+    },
+    eval: function (env) {
+        var a = this.operands[0].eval(env),
+            b = this.operands[1].eval(env);
+
+        if (env.isMathOn()) {
+            if (a instanceof tree.Dimension && b instanceof tree.Color) {
+                a = a.toColor();
+            }
+            if (b instanceof tree.Dimension && a instanceof tree.Color) {
+                b = b.toColor();
+            }
+            if (!a.operate) {
+                throw { type: "Operation",
+                        message: "Operation on an invalid type" };
+            }
+
+            return a.operate(env, this.op, b);
+        } else {
+            return new(tree.Operation)(this.op, [a, b], this.isSpaced);
+        }
+    },
+    genCSS: function (env, output) {
+        this.operands[0].genCSS(env, output);
+        if (this.isSpaced) {
+            output.add(" ");
+        }
+        output.add(this.op);
+        if (this.isSpaced) {
+            output.add(" ");
+        }
+        this.operands[1].genCSS(env, output);
+    },
+    toCSS: tree.toCSS
+};
+
+tree.operate = function (env, op, a, b) {
+    switch (op) {
+        case '+': return a + b;
+        case '-': return a - b;
+        case '*': return a * b;
+        case '/': return a / b;
+    }
+};
+
+})(require('../tree'));
+
+
+(function (tree) {
+
+tree.Paren = function (node) {
+    this.value = node;
+};
+tree.Paren.prototype = {
+    type: "Paren",
+    accept: function (visitor) {
+        this.value = visitor.visit(this.value);
+    },
+    genCSS: function (env, output) {
+        output.add('(');
+        this.value.genCSS(env, output);
+        output.add(')');
+    },
+    toCSS: tree.toCSS,
+    eval: function (env) {
+        return new(tree.Paren)(this.value.eval(env));
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Quoted = function (str, content, escaped, index, currentFileInfo) {
+    this.escaped = escaped;
+    this.value = content || '';
+    this.quote = str.charAt(0);
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+};
+tree.Quoted.prototype = {
+    type: "Quoted",
+    genCSS: function (env, output) {
+        if (!this.escaped) {
+            output.add(this.quote, this.currentFileInfo, this.index);
+        }
+        output.add(this.value);
+        if (!this.escaped) {
+            output.add(this.quote);
+        }
+    },
+    toCSS: tree.toCSS,
+    eval: function (env) {
+        var that = this;
+        var value = this.value.replace(/`([^`]+)`/g, function (_, exp) {
+            return new(tree.JavaScript)(exp, that.index, true).eval(env).value;
+        }).replace(/@\{([\w-]+)\}/g, function (_, name) {
+            var v = new(tree.Variable)('@' + name, that.index, that.currentFileInfo).eval(env, true);
+            return (v instanceof tree.Quoted) ? v.value : v.toCSS();
+        });
+        return new(tree.Quoted)(this.quote + value + this.quote, value, this.escaped, this.index, this.currentFileInfo);
+    },
+    compare: function (x) {
+        if (!x.toCSS) {
+            return -1;
+        }
+        
+        var left = this.toCSS(),
+            right = x.toCSS();
+        
+        if (left === right) {
+            return 0;
+        }
+        
+        return left < right ? -1 : 1;
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Rule = function (name, value, important, merge, index, currentFileInfo, inline) {
+    this.name = name;
+    this.value = (value instanceof tree.Value || value instanceof tree.Ruleset) ? value : new(tree.Value)([value]);
+    this.important = important ? ' ' + important.trim() : '';
+    this.merge = merge;
+    this.index = index;
+    this.currentFileInfo = currentFileInfo;
+    this.inline = inline || false;
+    this.variable = name.charAt && (name.charAt(0) === '@');
+};
+
+tree.Rule.prototype = {
+    type: "Rule",
+    accept: function (visitor) {
+        this.value = visitor.visit(this.value);
+    },
+    genCSS: function (env, output) {
+        output.add(this.name + (env.compress ? ':' : ': '), this.currentFileInfo, this.index);
+        try {
+            this.value.genCSS(env, output);
+        }
+        catch(e) {
+            e.index = this.index;
+            e.filename = this.currentFileInfo.filename;
+            throw e;
+        }
+        output.add(this.important + ((this.inline || (env.lastRule && env.compress)) ? "" : ";"), this.currentFileInfo, this.index);
+    },
+    toCSS: tree.toCSS,
+    eval: function (env) {
+        var strictMathBypass = false, name = this.name, evaldValue;
+        if (typeof name !== "string") {
+            // expand 'primitive' name directly to get
+            // things faster (~10% for benchmark.less):
+            name = (name.length === 1) 
+                && (name[0] instanceof tree.Keyword)
+                    ? name[0].value : evalName(env, name);
+        }
+        if (name === "font" && !env.strictMath) {
+            strictMathBypass = true;
+            env.strictMath = true;
+        }
+        try {
+            evaldValue = this.value.eval(env);
+            
+            if (!this.variable && evaldValue.type === "DetachedRuleset") {
+                throw { message: "Rulesets cannot be evaluated on a property.",
+                        index: this.index, filename: this.currentFileInfo.filename };
+            }
+
+            return new(tree.Rule)(name,
+                              evaldValue,
+                              this.important,
+                              this.merge,
+                              this.index, this.currentFileInfo, this.inline);
+        }
+        catch(e) {
+            if (typeof e.index !== 'number') {
+                e.index = this.index;
+                e.filename = this.currentFileInfo.filename;
+            }
+            throw e;
+        }
+        finally {
+            if (strictMathBypass) {
+                env.strictMath = false;
+            }
+        }
+    },
+    makeImportant: function () {
+        return new(tree.Rule)(this.name,
+                              this.value,
+                              "!important",
+                              this.merge,
+                              this.index, this.currentFileInfo, this.inline);
+    }
+};
+
+function evalName(env, name) {
+    var value = "", i, n = name.length,
+        output = {add: function (s) {value += s;}};
+    for (i = 0; i < n; i++) {
+        name[i].eval(env).genCSS(env, output);
+    }
+    return value;
+}
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.RulesetCall = function (variable) {
+    this.variable = variable;
+};
+tree.RulesetCall.prototype = {
+    type: "RulesetCall",
+    accept: function (visitor) {
+    },
+    eval: function (env) {
+        var detachedRuleset = new(tree.Variable)(this.variable).eval(env);
+        return detachedRuleset.callEval(env);
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Ruleset = function (selectors, rules, strictImports) {
+    this.selectors = selectors;
+    this.rules = rules;
+    this._lookups = {};
+    this.strictImports = strictImports;
+};
+tree.Ruleset.prototype = {
+    type: "Ruleset",
+    accept: function (visitor) {
+        if (this.paths) {
+            visitor.visitArray(this.paths, true);
+        } else if (this.selectors) {
+            this.selectors = visitor.visitArray(this.selectors);
+        }
+        if (this.rules && this.rules.length) {
+            this.rules = visitor.visitArray(this.rules);
+        }
+    },
+    eval: function (env) {
+        var thisSelectors = this.selectors, selectors, 
+            selCnt, selector, i, defaultFunc = tree.defaultFunc, hasOnePassingSelector = false;
+
+        if (thisSelectors && (selCnt = thisSelectors.length)) {
+            selectors = [];
+            defaultFunc.error({
+                type: "Syntax", 
+                message: "it is currently only allowed in parametric mixin guards," 
+            });
+            for (i = 0; i < selCnt; i++) {
+                selector = thisSelectors[i].eval(env);
+                selectors.push(selector);
+                if (selector.evaldCondition) {
+                    hasOnePassingSelector = true;
+                }
+            }
+            defaultFunc.reset();  
+        } else {
+            hasOnePassingSelector = true;
+        }
+
+        var rules = this.rules ? this.rules.slice(0) : null,
+            ruleset = new(tree.Ruleset)(selectors, rules, this.strictImports),
+            rule, subRule;
+
+        ruleset.originalRuleset = this;
+        ruleset.root = this.root;
+        ruleset.firstRoot = this.firstRoot;
+        ruleset.allowImports = this.allowImports;
+
+        if(this.debugInfo) {
+            ruleset.debugInfo = this.debugInfo;
+        }
+        
+        if (!hasOnePassingSelector) {
+            rules.length = 0;
+        }
+
+        // push the current ruleset to the frames stack
+        var envFrames = env.frames;
+        envFrames.unshift(ruleset);
+
+        // currrent selectors
+        var envSelectors = env.selectors;
+        if (!envSelectors) {
+            env.selectors = envSelectors = [];
+        }
+        envSelectors.unshift(this.selectors);
+
+        // Evaluate imports
+        if (ruleset.root || ruleset.allowImports || !ruleset.strictImports) {
+            ruleset.evalImports(env);
+        }
+
+        // Store the frames around mixin definitions,
+        // so they can be evaluated like closures when the time comes.
+        var rsRules = ruleset.rules, rsRuleCnt = rsRules ? rsRules.length : 0;
+        for (i = 0; i < rsRuleCnt; i++) {
+            if (rsRules[i] instanceof tree.mixin.Definition || rsRules[i] instanceof tree.DetachedRuleset) {
+                rsRules[i] = rsRules[i].eval(env);
+            }
+        }
+
+        var mediaBlockCount = (env.mediaBlocks && env.mediaBlocks.length) || 0;
+
+        // Evaluate mixin calls.
+        for (i = 0; i < rsRuleCnt; i++) {
+            if (rsRules[i] instanceof tree.mixin.Call) {
+                /*jshint loopfunc:true */
+                rules = rsRules[i].eval(env).filter(function(r) {
+                    if ((r instanceof tree.Rule) && r.variable) {
+                        // do not pollute the scope if the variable is
+                        // already there. consider returning false here
+                        // but we need a way to "return" variable from mixins
+                        return !(ruleset.variable(r.name));
+                    }
+                    return true;
+                });
+                rsRules.splice.apply(rsRules, [i, 1].concat(rules));
+                rsRuleCnt += rules.length - 1;
+                i += rules.length-1;
+                ruleset.resetCache();
+            } else if (rsRules[i] instanceof tree.RulesetCall) {
+                /*jshint loopfunc:true */
+                rules = rsRules[i].eval(env).rules.filter(function(r) {
+                    if ((r instanceof tree.Rule) && r.variable) {
+                        // do not pollute the scope at all
+                        return false;
+                    }
+                    return true;
+                });
+                rsRules.splice.apply(rsRules, [i, 1].concat(rules));
+                rsRuleCnt += rules.length - 1;
+                i += rules.length-1;
+                ruleset.resetCache();
+            }
+        }
+
+        // Evaluate everything else
+        for (i = 0; i < rsRules.length; i++) {
+            rule = rsRules[i];
+            if (! (rule instanceof tree.mixin.Definition || rule instanceof tree.DetachedRuleset)) {
+                rsRules[i] = rule = rule.eval ? rule.eval(env) : rule;
+            }
+        }
+        
+        // Evaluate everything else
+        for (i = 0; i < rsRules.length; i++) {
+            rule = rsRules[i];
+            // for rulesets, check if it is a css guard and can be removed
+            if (rule instanceof tree.Ruleset && rule.selectors && rule.selectors.length === 1) {
+                // check if it can be folded in (e.g. & where)
+                if (rule.selectors[0].isJustParentSelector()) {
+                    rsRules.splice(i--, 1);
+
+                    for(var j = 0; j < rule.rules.length; j++) {
+                        subRule = rule.rules[j];
+                        if (!(subRule instanceof tree.Rule) || !subRule.variable) {
+                            rsRules.splice(++i, 0, subRule);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pop the stack
+        envFrames.shift();
+        envSelectors.shift();
+        
+        if (env.mediaBlocks) {
+            for (i = mediaBlockCount; i < env.mediaBlocks.length; i++) {
+                env.mediaBlocks[i].bubbleSelectors(selectors);
+            }
+        }
+
+        return ruleset;
+    },
+    evalImports: function(env) {
+        var rules = this.rules, i, importRules;
+        if (!rules) { return; }
+
+        for (i = 0; i < rules.length; i++) {
+            if (rules[i] instanceof tree.Import) {
+                importRules = rules[i].eval(env);
+                if (importRules && importRules.length) {
+                    rules.splice.apply(rules, [i, 1].concat(importRules));
+                    i+= importRules.length-1;
+                } else {
+                    rules.splice(i, 1, importRules);
+                }
+                this.resetCache();
+            }
+        }
+    },
+    makeImportant: function() {
+        return new tree.Ruleset(this.selectors, this.rules.map(function (r) {
+                    if (r.makeImportant) {
+                        return r.makeImportant();
+                    } else {
+                        return r;
+                    }
+                }), this.strictImports);
+    },
+    matchArgs: function (args) {
+        return !args || args.length === 0;
+    },
+    // lets you call a css selector with a guard
+    matchCondition: function (args, env) {
+        var lastSelector = this.selectors[this.selectors.length-1];
+        if (!lastSelector.evaldCondition) {
+            return false;
+        }
+        if (lastSelector.condition &&
+            !lastSelector.condition.eval(
+                new(tree.evalEnv)(env,
+                    env.frames))) {
+            return false;
+        }
+        return true;
+    },
+    resetCache: function () {
+        this._rulesets = null;
+        this._variables = null;
+        this._lookups = {};
+    },
+    variables: function () {
+        if (!this._variables) {
+            this._variables = !this.rules ? {} : this.rules.reduce(function (hash, r) {
+                if (r instanceof tree.Rule && r.variable === true) {
+                    hash[r.name] = r;
+                }
+                return hash;
+            }, {});
+        }
+        return this._variables;
+    },
+    variable: function (name) {
+        return this.variables()[name];
+    },
+    rulesets: function () {
+        if (!this.rules) { return null; }
+
+        var _Ruleset = tree.Ruleset, _MixinDefinition = tree.mixin.Definition,
+            filtRules = [], rules = this.rules, cnt = rules.length,
+            i, rule;
+
+        for (i = 0; i < cnt; i++) {
+            rule = rules[i];
+            if ((rule instanceof _Ruleset) || (rule instanceof _MixinDefinition)) {
+                filtRules.push(rule);
+            }
+        }
+
+        return filtRules;
+    },
+    prependRule: function (rule) {
+        var rules = this.rules;
+        if (rules) { rules.unshift(rule); } else { this.rules = [ rule ]; }
+    },
+    find: function (selector, self) {
+        self = self || this;
+        var rules = [], match,
+            key = selector.toCSS();
+
+        if (key in this._lookups) { return this._lookups[key]; }
+
+        this.rulesets().forEach(function (rule) {
+            if (rule !== self) {
+                for (var j = 0; j < rule.selectors.length; j++) {
+                    match = selector.match(rule.selectors[j]);
+                    if (match) {
+                        if (selector.elements.length > match) {
+                            Array.prototype.push.apply(rules, rule.find(
+                                new(tree.Selector)(selector.elements.slice(match)), self));
+                        } else {
+                            rules.push(rule);
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        this._lookups[key] = rules;
+        return rules;
+    },
+    genCSS: function (env, output) {
+        var i, j,
+            ruleNodes = [],
+            rulesetNodes = [],
+            rulesetNodeCnt,
+            debugInfo,     // Line number debugging
+            rule,
+            path;
+
+        env.tabLevel = (env.tabLevel || 0);
+
+        if (!this.root) {
+            env.tabLevel++;
+        }
+
+        var tabRuleStr = env.compress ? '' : Array(env.tabLevel + 1).join("  "),
+            tabSetStr = env.compress ? '' : Array(env.tabLevel).join("  "),
+            sep;
+
+        for (i = 0; i < this.rules.length; i++) {
+            rule = this.rules[i];
+            if (rule.rules || (rule instanceof tree.Media) || rule instanceof tree.Directive || (this.root && rule instanceof tree.Comment)) {
+                rulesetNodes.push(rule);
+            } else {
+                ruleNodes.push(rule);
+            }
+        }
+
+        // If this is the root node, we don't render
+        // a selector, or {}.
+        if (!this.root) {
+            debugInfo = tree.debugInfo(env, this, tabSetStr);
+
+            if (debugInfo) {
+                output.add(debugInfo);
+                output.add(tabSetStr);
+            }
+
+            var paths = this.paths, pathCnt = paths.length,
+                pathSubCnt;
+
+            sep = env.compress ? ',' : (',\n' + tabSetStr);
+
+            for (i = 0; i < pathCnt; i++) {
+                path = paths[i];
+                if (!(pathSubCnt = path.length)) { continue; }
+                if (i > 0) { output.add(sep); }
+
+                env.firstSelector = true;
+                path[0].genCSS(env, output);
+
+                env.firstSelector = false;
+                for (j = 1; j < pathSubCnt; j++) {
+                    path[j].genCSS(env, output);
+                }
+            }
+
+            output.add((env.compress ? '{' : ' {\n') + tabRuleStr);
+        }
+
+        // Compile rules and rulesets
+        for (i = 0; i < ruleNodes.length; i++) {
+            rule = ruleNodes[i];
+
+            // @page{ directive ends up with root elements inside it, a mix of rules and rulesets
+            // In this instance we do not know whether it is the last property
+            if (i + 1 === ruleNodes.length && (!this.root || rulesetNodes.length === 0 || this.firstRoot)) {
+                env.lastRule = true;
+            }
+
+            if (rule.genCSS) {
+                rule.genCSS(env, output);
+            } else if (rule.value) {
+                output.add(rule.value.toString());
+            }
+
+            if (!env.lastRule) {
+                output.add(env.compress ? '' : ('\n' + tabRuleStr));
+            } else {
+                env.lastRule = false;
+            }
+        }
+
+        if (!this.root) {
+            output.add((env.compress ? '}' : '\n' + tabSetStr + '}'));
+            env.tabLevel--;
+        }
+
+        sep = (env.compress ? "" : "\n") + (this.root ? tabRuleStr : tabSetStr);
+        rulesetNodeCnt = rulesetNodes.length;
+        if (rulesetNodeCnt) {
+            if (ruleNodes.length && sep) { output.add(sep); }
+            rulesetNodes[0].genCSS(env, output);
+            for (i = 1; i < rulesetNodeCnt; i++) {
+                if (sep) { output.add(sep); }
+                rulesetNodes[i].genCSS(env, output);
+            }
+        }
+
+        if (!output.isEmpty() && !env.compress && this.firstRoot) {
+            output.add('\n');
+        }
+    },
+
+    toCSS: tree.toCSS,
+
+    markReferenced: function () {
+        if (!this.selectors) {
+            return;
+        }
+        for (var s = 0; s < this.selectors.length; s++) {
+            this.selectors[s].markReferenced();
+        }
+    },
+
+    joinSelectors: function (paths, context, selectors) {
+        for (var s = 0; s < selectors.length; s++) {
+            this.joinSelector(paths, context, selectors[s]);
+        }
+    },
+
+    joinSelector: function (paths, context, selector) {
+
+        var i, j, k, 
+            hasParentSelector, newSelectors, el, sel, parentSel, 
+            newSelectorPath, afterParentJoin, newJoinedSelector, 
+            newJoinedSelectorEmpty, lastSelector, currentElements,
+            selectorsMultiplied;
+    
+        for (i = 0; i < selector.elements.length; i++) {
+            el = selector.elements[i];
+            if (el.value === '&') {
+                hasParentSelector = true;
+            }
+        }
+    
+        if (!hasParentSelector) {
+            if (context.length > 0) {
+                for (i = 0; i < context.length; i++) {
+                    paths.push(context[i].concat(selector));
+                }
+            }
+            else {
+                paths.push([selector]);
+            }
+            return;
+        }
+
+        // The paths are [[Selector]]
+        // The first list is a list of comma seperated selectors
+        // The inner list is a list of inheritance seperated selectors
+        // e.g.
+        // .a, .b {
+        //   .c {
+        //   }
+        // }
+        // == [[.a] [.c]] [[.b] [.c]]
+        //
+
+        // the elements from the current selector so far
+        currentElements = [];
+        // the current list of new selectors to add to the path.
+        // We will build it up. We initiate it with one empty selector as we "multiply" the new selectors
+        // by the parents
+        newSelectors = [[]];
+
+        for (i = 0; i < selector.elements.length; i++) {
+            el = selector.elements[i];
+            // non parent reference elements just get added
+            if (el.value !== "&") {
+                currentElements.push(el);
+            } else {
+                // the new list of selectors to add
+                selectorsMultiplied = [];
+
+                // merge the current list of non parent selector elements
+                // on to the current list of selectors to add
+                if (currentElements.length > 0) {
+                    this.mergeElementsOnToSelectors(currentElements, newSelectors);
+                }
+
+                // loop through our current selectors
+                for (j = 0; j < newSelectors.length; j++) {
+                    sel = newSelectors[j];
+                    // if we don't have any parent paths, the & might be in a mixin so that it can be used
+                    // whether there are parents or not
+                    if (context.length === 0) {
+                        // the combinator used on el should now be applied to the next element instead so that
+                        // it is not lost
+                        if (sel.length > 0) {
+                            sel[0].elements = sel[0].elements.slice(0);
+                            sel[0].elements.push(new(tree.Element)(el.combinator, '', el.index, el.currentFileInfo));
+                        }
+                        selectorsMultiplied.push(sel);
+                    }
+                    else {
+                        // and the parent selectors
+                        for (k = 0; k < context.length; k++) {
+                            parentSel = context[k];
+                            // We need to put the current selectors
+                            // then join the last selector's elements on to the parents selectors
+
+                            // our new selector path
+                            newSelectorPath = [];
+                            // selectors from the parent after the join
+                            afterParentJoin = [];
+                            newJoinedSelectorEmpty = true;
+
+                            //construct the joined selector - if & is the first thing this will be empty,
+                            // if not newJoinedSelector will be the last set of elements in the selector
+                            if (sel.length > 0) {
+                                newSelectorPath = sel.slice(0);
+                                lastSelector = newSelectorPath.pop();
+                                newJoinedSelector = selector.createDerived(lastSelector.elements.slice(0));
+                                newJoinedSelectorEmpty = false;
+                            }
+                            else {
+                                newJoinedSelector = selector.createDerived([]);
+                            }
+
+                            //put together the parent selectors after the join
+                            if (parentSel.length > 1) {
+                                afterParentJoin = afterParentJoin.concat(parentSel.slice(1));
+                            }
+
+                            if (parentSel.length > 0) {
+                                newJoinedSelectorEmpty = false;
+
+                                // join the elements so far with the first part of the parent
+                                newJoinedSelector.elements.push(new(tree.Element)(el.combinator, parentSel[0].elements[0].value, el.index, el.currentFileInfo));
+                                newJoinedSelector.elements = newJoinedSelector.elements.concat(parentSel[0].elements.slice(1));
+                            }
+
+                            if (!newJoinedSelectorEmpty) {
+                                // now add the joined selector
+                                newSelectorPath.push(newJoinedSelector);
+                            }
+
+                            // and the rest of the parent
+                            newSelectorPath = newSelectorPath.concat(afterParentJoin);
+
+                            // add that to our new set of selectors
+                            selectorsMultiplied.push(newSelectorPath);
+                        }
+                    }
+                }
+
+                // our new selectors has been multiplied, so reset the state
+                newSelectors = selectorsMultiplied;
+                currentElements = [];
+            }
+        }
+
+        // if we have any elements left over (e.g. .a& .b == .b)
+        // add them on to all the current selectors
+        if (currentElements.length > 0) {
+            this.mergeElementsOnToSelectors(currentElements, newSelectors);
+        }
+
+        for (i = 0; i < newSelectors.length; i++) {
+            if (newSelectors[i].length > 0) {
+                paths.push(newSelectors[i]);
+            }
+        }
+    },
+    
+    mergeElementsOnToSelectors: function(elements, selectors) {
+        var i, sel;
+
+        if (selectors.length === 0) {
+            selectors.push([ new(tree.Selector)(elements) ]);
+            return;
+        }
+
+        for (i = 0; i < selectors.length; i++) {
+            sel = selectors[i];
+
+            // if the previous thing in sel is a parent this needs to join on to it
+            if (sel.length > 0) {
+                sel[sel.length - 1] = sel[sel.length - 1].createDerived(sel[sel.length - 1].elements.concat(elements));
+            }
+            else {
+                sel.push(new(tree.Selector)(elements));
+            }
+        }
+    }
+};
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Selector = function (elements, extendList, condition, index, currentFileInfo, isReferenced) {
+    this.elements = elements;
+    this.extendList = extendList;
+    this.condition = condition;
+    this.currentFileInfo = currentFileInfo || {};
+    this.isReferenced = isReferenced;
+    if (!condition) {
+        this.evaldCondition = true;
+    }
+};
+tree.Selector.prototype = {
+    type: "Selector",
+    accept: function (visitor) {
+        if (this.elements) {
+            this.elements = visitor.visitArray(this.elements);
+        }
+        if (this.extendList) {
+            this.extendList = visitor.visitArray(this.extendList);
+        }
+        if (this.condition) {
+            this.condition = visitor.visit(this.condition);
+        }
+    },
+    createDerived: function(elements, extendList, evaldCondition) {
+        evaldCondition = (evaldCondition != null) ? evaldCondition : this.evaldCondition;
+        var newSelector = new(tree.Selector)(elements, extendList || this.extendList, null, this.index, this.currentFileInfo, this.isReferenced);
+        newSelector.evaldCondition = evaldCondition;
+        newSelector.mediaEmpty = this.mediaEmpty;
+        return newSelector;
+    },
+    match: function (other) {
+        var elements = this.elements,
+            len = elements.length,
+            olen, i;
+
+        other.CacheElements();
+
+        olen = other._elements.length;
+        if (olen === 0 || len < olen) {
+            return 0;
+        } else {
+            for (i = 0; i < olen; i++) {
+                if (elements[i].value !== other._elements[i]) {
+                    return 0;
+                }
+            }
+        }
+
+        return olen; // return number of matched elements
+    },
+    CacheElements: function(){
+        var css = '', len, v, i;
+
+        if( !this._elements ){
+
+            len = this.elements.length;
+            for(i = 0; i < len; i++){
+
+                v = this.elements[i];
+                css += v.combinator.value;
+
+                if( !v.value.value ){
+                    css += v.value;
+                    continue;
+                }
+
+                if( typeof v.value.value !== "string" ){
+                    css = '';
+                    break;
+                }
+                css += v.value.value;
+            }
+
+            this._elements = css.match(/[,&#\.\w-]([\w-]|(\\.))*/g);
+
+            if (this._elements) {
+                if (this._elements[0] === "&") {
+                    this._elements.shift();
+                }
+
+            } else {
+                this._elements = [];
+            }
+
+        }
+    },
+    isJustParentSelector: function() {
+        return !this.mediaEmpty && 
+            this.elements.length === 1 && 
+            this.elements[0].value === '&' && 
+            (this.elements[0].combinator.value === ' ' || this.elements[0].combinator.value === '');
+    },
+    eval: function (env) {
+        var evaldCondition = this.condition && this.condition.eval(env),
+            elements = this.elements, extendList = this.extendList;
+
+        elements = elements && elements.map(function (e) { return e.eval(env); });
+        extendList = extendList && extendList.map(function(extend) { return extend.eval(env); });
+
+        return this.createDerived(elements, extendList, evaldCondition);
+    },
+    genCSS: function (env, output) {
+        var i, element;
+        if ((!env || !env.firstSelector) && this.elements[0].combinator.value === "") {
+            output.add(' ', this.currentFileInfo, this.index);
+        }
+        if (!this._css) {
+            //TODO caching? speed comparison?
+            for(i = 0; i < this.elements.length; i++) {
+                element = this.elements[i];
+                element.genCSS(env, output);
+            }
+        }
+    },
+    toCSS: tree.toCSS,
+    markReferenced: function () {
+        this.isReferenced = true;
+    },
+    getIsReferenced: function() {
+        return !this.currentFileInfo.reference || this.isReferenced;
+    },
+    getIsOutput: function() {
+        return this.evaldCondition;
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.UnicodeDescriptor = function (value) {
+    this.value = value;
+};
+tree.UnicodeDescriptor.prototype = {
+    type: "UnicodeDescriptor",
+    genCSS: function (env, output) {
+        output.add(this.value);
+    },
+    toCSS: tree.toCSS,
+    eval: function () { return this; }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.URL = function (val, currentFileInfo, isEvald) {
+    this.value = val;
+    this.currentFileInfo = currentFileInfo;
+    this.isEvald = isEvald;
+};
+tree.URL.prototype = {
+    type: "Url",
+    accept: function (visitor) {
+        this.value = visitor.visit(this.value);
+    },
+    genCSS: function (env, output) {
+        output.add("url(");
+        this.value.genCSS(env, output);
+        output.add(")");
+    },
+    toCSS: tree.toCSS,
+    eval: function (ctx) {
+        var val = this.value.eval(ctx),
+            rootpath;
+
+        if (!this.isEvald) {
+            // Add the base path if the URL is relative
+            rootpath = this.currentFileInfo && this.currentFileInfo.rootpath;
+            if (rootpath && typeof val.value === "string" && ctx.isPathRelative(val.value)) {
+                if (!val.quote) {
+                    rootpath = rootpath.replace(/[\(\)'"\s]/g, function(match) { return "\\"+match; });
+                }
+                val.value = rootpath + val.value;
+            }
+            
+            val.value = ctx.normalizePath(val.value);
+
+            // Add url args if enabled
+            if (ctx.urlArgs) {
+                if (!val.value.match(/^\s*data:/)) {
+                    var delimiter = val.value.indexOf('?') === -1 ? '?' : '&';
+                    var urlArgs = delimiter + ctx.urlArgs;
+                    if (val.value.indexOf('#') !== -1) {
+                        val.value = val.value.replace('#', urlArgs + '#');
+                    } else {
+                        val.value += urlArgs;
+                    }
+                }
+            }
+        }
+
+        return new(tree.URL)(val, this.currentFileInfo, true);
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Value = function (value) {
+    this.value = value;
+};
+tree.Value.prototype = {
+    type: "Value",
+    accept: function (visitor) {
+        if (this.value) {
+            this.value = visitor.visitArray(this.value);
+        }
+    },
+    eval: function (env) {
+        if (this.value.length === 1) {
+            return this.value[0].eval(env);
+        } else {
+            return new(tree.Value)(this.value.map(function (v) {
+                return v.eval(env);
+            }));
+        }
+    },
+    genCSS: function (env, output) {
+        var i;
+        for(i = 0; i < this.value.length; i++) {
+            this.value[i].genCSS(env, output);
+            if (i+1 < this.value.length) {
+                output.add((env && env.compress) ? ',' : ', ');
+            }
+        }
+    },
+    toCSS: tree.toCSS
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+tree.Variable = function (name, index, currentFileInfo) {
+    this.name = name;
+    this.index = index;
+    this.currentFileInfo = currentFileInfo || {};
+};
+tree.Variable.prototype = {
+    type: "Variable",
+    eval: function (env) {
+        var variable, name = this.name;
+
+        if (name.indexOf('@@') === 0) {
+            name = '@' + new(tree.Variable)(name.slice(1)).eval(env).value;
+        }
+        
+        if (this.evaluating) {
+            throw { type: 'Name',
+                    message: "Recursive variable definition for " + name,
+                    filename: this.currentFileInfo.file,
+                    index: this.index };
+        }
+        
+        this.evaluating = true;
+
+        variable = tree.find(env.frames, function (frame) {
+            var v = frame.variable(name);
+            if (v) {
+                return v.value.eval(env);
+            }
+        });
+        if (variable) { 
+            this.evaluating = false;
+            return variable;
+        } else {
+            throw { type: 'Name',
+                    message: "variable " + name + " is undefined",
+                    filename: this.currentFileInfo.filename,
+                    index: this.index };
+        }
+    }
+};
+
+})(require('../tree'));
+
+(function (tree) {
+
+    var parseCopyProperties = [
+        'paths',            // option - unmodified - paths to search for imports on
+        'optimization',     // option - optimization level (for the chunker)
+        'files',            // list of files that have been imported, used for import-once
+        'contents',         // map - filename to contents of all the files
+        'contentsIgnoredChars', // map - filename to lines at the begining of each file to ignore
+        'relativeUrls',     // option - whether to adjust URL's to be relative
+        'rootpath',         // option - rootpath to append to URL's
+        'strictImports',    // option -
+        'insecure',         // option - whether to allow imports from insecure ssl hosts
+        'dumpLineNumbers',  // option - whether to dump line numbers
+        'compress',         // option - whether to compress
+        'processImports',   // option - whether to process imports. if false then imports will not be imported
+        'syncImport',       // option - whether to import synchronously
+        'javascriptEnabled',// option - whether JavaScript is enabled. if undefined, defaults to true
+        'mime',             // browser only - mime type for sheet import
+        'useFileCache',     // browser only - whether to use the per file session cache
+        'currentFileInfo'   // information about the current file - for error reporting and importing and making urls relative etc.
+    ];
+
+    //currentFileInfo = {
+    //  'relativeUrls' - option - whether to adjust URL's to be relative
+    //  'filename' - full resolved filename of current file
+    //  'rootpath' - path to append to normal URLs for this node
+    //  'currentDirectory' - path to the current file, absolute
+    //  'rootFilename' - filename of the base file
+    //  'entryPath' - absolute path to the entry file
+    //  'reference' - whether the file should not be output and only output parts that are referenced
+
+    tree.parseEnv = function(options) {
+        copyFromOriginal(options, this, parseCopyProperties);
+
+        if (!this.contents) { this.contents = {}; }
+        if (!this.contentsIgnoredChars) { this.contentsIgnoredChars = {}; }
+        if (!this.files) { this.files = {}; }
+
+        if (!this.currentFileInfo) {
+            var filename = (options && options.filename) || "input";
+            var entryPath = filename.replace(/[^\/\\]*$/, "");
+            if (options) {
+                options.filename = null;
+            }
+            this.currentFileInfo = {
+                filename: filename,
+                relativeUrls: this.relativeUrls,
+                rootpath: (options && options.rootpath) || "",
+                currentDirectory: entryPath,
+                entryPath: entryPath,
+                rootFilename: filename
+            };
+        }
+    };
+
+    var evalCopyProperties = [
+        'silent',         // whether to swallow errors and warnings
+        'verbose',        // whether to log more activity
+        'compress',       // whether to compress
+        'yuicompress',    // whether to compress with the outside tool yui compressor
+        'ieCompat',       // whether to enforce IE compatibility (IE8 data-uri)
+        'strictMath',     // whether math has to be within parenthesis
+        'strictUnits',    // whether units need to evaluate correctly
+        'cleancss',       // whether to compress with clean-css
+        'sourceMap',      // whether to output a source map
+        'importMultiple', // whether we are currently importing multiple copies
+        'urlArgs'         // whether to add args into url tokens
+        ];
+
+    tree.evalEnv = function(options, frames) {
+        copyFromOriginal(options, this, evalCopyProperties);
+
+        this.frames = frames || [];
+    };
+
+    tree.evalEnv.prototype.inParenthesis = function () {
+        if (!this.parensStack) {
+            this.parensStack = [];
+        }
+        this.parensStack.push(true);
+    };
+
+    tree.evalEnv.prototype.outOfParenthesis = function () {
+        this.parensStack.pop();
+    };
+
+    tree.evalEnv.prototype.isMathOn = function () {
+        return this.strictMath ? (this.parensStack && this.parensStack.length) : true;
+    };
+
+    tree.evalEnv.prototype.isPathRelative = function (path) {
+        return !/^(?:[a-z-]+:|\/)/.test(path);
+    };
+
+    tree.evalEnv.prototype.normalizePath = function( path ) {
+        var
+          segments = path.split("/").reverse(),
+          segment;
+
+        path = [];
+        while (segments.length !== 0 ) {
+            segment = segments.pop();
+            switch( segment ) {
+                case ".":
+                    break;
+                case "..":
+                    if ((path.length === 0) || (path[path.length - 1] === "..")) {
+                        path.push( segment );
+                    } else {
+                        path.pop();
+                    }
+                    break;
+                default:
+                    path.push( segment );
+                    break;
+            }
+        }
+
+        return path.join("/");
+    };
+
+    //todo - do the same for the toCSS env
+    //tree.toCSSEnv = function (options) {
+    //};
+
+    var copyFromOriginal = function(original, destination, propertiesToCopy) {
+        if (!original) { return; }
+
+        for(var i = 0; i < propertiesToCopy.length; i++) {
+            if (original.hasOwnProperty(propertiesToCopy[i])) {
+                destination[propertiesToCopy[i]] = original[propertiesToCopy[i]];
+            }
+        }
+    };
+
+})(require('./tree'));
+
+(function (tree) {
+
+    var _visitArgs = { visitDeeper: true },
+        _hasIndexed = false;
+
+    function _noop(node) {
+        return node;
+    }
+
+    function indexNodeTypes(parent, ticker) {
+        // add .typeIndex to tree node types for lookup table
+        var key, child;
+        for (key in parent) {
+            if (parent.hasOwnProperty(key)) {
+                child = parent[key];
+                switch (typeof child) {
+                    case "function":
+                        // ignore bound functions directly on tree which do not have a prototype
+                        // or aren't nodes
+                        if (child.prototype && child.prototype.type) {
+                            child.prototype.typeIndex = ticker++;
+                        }
+                        break;
+                    case "object":
+                        ticker = indexNodeTypes(child, ticker);
+                        break;
+                }
+            }
+        }
+        return ticker;
+    }
+
+    tree.visitor = function(implementation) {
+        this._implementation = implementation;
+        this._visitFnCache = [];
+
+        if (!_hasIndexed) {
+            indexNodeTypes(tree, 1);
+            _hasIndexed = true;
+        }
+    };
+
+    tree.visitor.prototype = {
+        visit: function(node) {
+            if (!node) {
+                return node;
+            }
+
+            var nodeTypeIndex = node.typeIndex;
+            if (!nodeTypeIndex) {
+                return node;
+            }
+
+            var visitFnCache = this._visitFnCache,
+                impl = this._implementation,
+                aryIndx = nodeTypeIndex << 1,
+                outAryIndex = aryIndx | 1,
+                func = visitFnCache[aryIndx],
+                funcOut = visitFnCache[outAryIndex],
+                visitArgs = _visitArgs,
+                fnName;
+
+            visitArgs.visitDeeper = true;
+
+            if (!func) {
+                fnName = "visit" + node.type;
+                func = impl[fnName] || _noop;
+                funcOut = impl[fnName + "Out"] || _noop;
+                visitFnCache[aryIndx] = func;
+                visitFnCache[outAryIndex] = funcOut;
+            }
+
+            if (func !== _noop) {
+                var newNode = func.call(impl, node, visitArgs);
+                if (impl.isReplacing) {
+                    node = newNode;
+                }
+            }
+
+            if (visitArgs.visitDeeper && node && node.accept) {
+                node.accept(this);
+            }
+
+            if (funcOut != _noop) {
+                funcOut.call(impl, node);
+            }
+
+            return node;
+        },
+        visitArray: function(nodes, nonReplacing) {
+            if (!nodes) {
+                return nodes;
+            }
+
+            var cnt = nodes.length, i;
+
+            // Non-replacing
+            if (nonReplacing || !this._implementation.isReplacing) {
+                for (i = 0; i < cnt; i++) {
+                    this.visit(nodes[i]);
+                }
+                return nodes;
+            }
+
+            // Replacing
+            var out = [];
+            for (i = 0; i < cnt; i++) {
+                var evald = this.visit(nodes[i]);
+                if (!evald.splice) {
+                    out.push(evald);
+                } else if (evald.length) {
+                    this.flatten(evald, out);
+                }
+            }
+            return out;
+        },
+        flatten: function(arr, out) {
+            if (!out) {
+                out = [];
+            }
+
+            var cnt, i, item,
+                nestedCnt, j, nestedItem;
+
+            for (i = 0, cnt = arr.length; i < cnt; i++) {
+                item = arr[i];
+                if (!item.splice) {
+                    out.push(item);
+                    continue;
+                }
+
+                for (j = 0, nestedCnt = item.length; j < nestedCnt; j++) {
+                    nestedItem = item[j];
+                    if (!nestedItem.splice) {
+                        out.push(nestedItem);
+                    } else if (nestedItem.length) {
+                        this.flatten(nestedItem, out);
+                    }
+                }
+            }
+
+            return out;
+        }
+    };
+
+})(require('./tree'));
+(function (tree) {
+    tree.importVisitor = function(importer, finish, evalEnv, onceFileDetectionMap, recursionDetector) {
+        this._visitor = new tree.visitor(this);
+        this._importer = importer;
+        this._finish = finish;
+        this.env = evalEnv || new tree.evalEnv();
+        this.importCount = 0;
+        this.onceFileDetectionMap = onceFileDetectionMap || {};
+        this.recursionDetector = {};
+        if (recursionDetector) {
+            for(var fullFilename in recursionDetector) {
+                if (recursionDetector.hasOwnProperty(fullFilename)) {
+                    this.recursionDetector[fullFilename] = true;
+                }
+            }
+        }
+    };
+
+    tree.importVisitor.prototype = {
+        isReplacing: true,
+        run: function (root) {
+            var error;
+            try {
+                // process the contents
+                this._visitor.visit(root);
+            }
+            catch(e) {
+                error = e;
+            }
+
+            this.isFinished = true;
+
+            if (this.importCount === 0) {
+                this._finish(error);
+            }
+        },
+        visitImport: function (importNode, visitArgs) {
+            var importVisitor = this,
+                evaldImportNode,
+                inlineCSS = importNode.options.inline;
+            
+            if (!importNode.css || inlineCSS) {
+
+                try {
+                    evaldImportNode = importNode.evalForImport(this.env);
+                } catch(e){
+                    if (!e.filename) { e.index = importNode.index; e.filename = importNode.currentFileInfo.filename; }
+                    // attempt to eval properly and treat as css
+                    importNode.css = true;
+                    // if that fails, this error will be thrown
+                    importNode.error = e;
+                }
+
+                if (evaldImportNode && (!evaldImportNode.css || inlineCSS)) {
+                    importNode = evaldImportNode;
+                    this.importCount++;
+                    var env = new tree.evalEnv(this.env, this.env.frames.slice(0));
+
+                    if (importNode.options.multiple) {
+                        env.importMultiple = true;
+                    }
+
+                    this._importer.push(importNode.getPath(), importNode.currentFileInfo, importNode.options, function (e, root, importedAtRoot, fullPath) {
+                        if (e && !e.filename) { e.index = importNode.index; e.filename = importNode.currentFileInfo.filename; }
+
+                        if (!env.importMultiple) { 
+                            if (importedAtRoot) {
+                                importNode.skip = true;
+                            } else {
+                                importNode.skip = function() {
+                                    if (fullPath in importVisitor.onceFileDetectionMap) {
+                                        return true;
+                                    }
+                                    importVisitor.onceFileDetectionMap[fullPath] = true;
+                                    return false;
+                                }; 
+                            }
+                        }
+
+                        var subFinish = function(e) {
+                            importVisitor.importCount--;
+
+                            if (importVisitor.importCount === 0 && importVisitor.isFinished) {
+                                importVisitor._finish(e);
+                            }
+                        };
+
+                        if (root) {
+                            importNode.root = root;
+                            importNode.importedFilename = fullPath;
+                            var duplicateImport = importedAtRoot || fullPath in importVisitor.recursionDetector;
+
+                            if (!inlineCSS && (env.importMultiple || !duplicateImport)) {
+                                importVisitor.recursionDetector[fullPath] = true;
+                                new(tree.importVisitor)(importVisitor._importer, subFinish, env, importVisitor.onceFileDetectionMap, importVisitor.recursionDetector)
+                                    .run(root);
+                                return;
+                            }
+                        }
+
+                        subFinish();
+                    });
+                }
+            }
+            visitArgs.visitDeeper = false;
+            return importNode;
+        },
+        visitRule: function (ruleNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+            return ruleNode;
+        },
+        visitDirective: function (directiveNode, visitArgs) {
+            this.env.frames.unshift(directiveNode);
+            return directiveNode;
+        },
+        visitDirectiveOut: function (directiveNode) {
+            this.env.frames.shift();
+        },
+        visitMixinDefinition: function (mixinDefinitionNode, visitArgs) {
+            this.env.frames.unshift(mixinDefinitionNode);
+            return mixinDefinitionNode;
+        },
+        visitMixinDefinitionOut: function (mixinDefinitionNode) {
+            this.env.frames.shift();
+        },
+        visitRuleset: function (rulesetNode, visitArgs) {
+            this.env.frames.unshift(rulesetNode);
+            return rulesetNode;
+        },
+        visitRulesetOut: function (rulesetNode) {
+            this.env.frames.shift();
+        },
+        visitMedia: function (mediaNode, visitArgs) {
+            this.env.frames.unshift(mediaNode.ruleset);
+            return mediaNode;
+        },
+        visitMediaOut: function (mediaNode) {
+            this.env.frames.shift();
+        }
+    };
+
+})(require('./tree'));
+(function (tree) {
+    tree.joinSelectorVisitor = function() {
+        this.contexts = [[]];
+        this._visitor = new tree.visitor(this);
+    };
+
+    tree.joinSelectorVisitor.prototype = {
+        run: function (root) {
+            return this._visitor.visit(root);
+        },
+        visitRule: function (ruleNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+        visitMixinDefinition: function (mixinDefinitionNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+
+        visitRuleset: function (rulesetNode, visitArgs) {
+            var context = this.contexts[this.contexts.length - 1],
+                paths = [], selectors;
+
+            this.contexts.push(paths);
+
+            if (! rulesetNode.root) {
+                selectors = rulesetNode.selectors;
+                if (selectors) {
+                    selectors = selectors.filter(function(selector) { return selector.getIsOutput(); });
+                    rulesetNode.selectors = selectors.length ? selectors : (selectors = null);
+                    if (selectors) { rulesetNode.joinSelectors(paths, context, selectors); }
+                }
+                if (!selectors) { rulesetNode.rules = null; }
+                rulesetNode.paths = paths;
+            }
+        },
+        visitRulesetOut: function (rulesetNode) {
+            this.contexts.length = this.contexts.length - 1;
+        },
+        visitMedia: function (mediaNode, visitArgs) {
+            var context = this.contexts[this.contexts.length - 1];
+            mediaNode.rules[0].root = (context.length === 0 || context[0].multiMedia);
+        }
+    };
+
+})(require('./tree'));
+(function (tree) {
+    tree.toCSSVisitor = function(env) {
+        this._visitor = new tree.visitor(this);
+        this._env = env;
+    };
+
+    tree.toCSSVisitor.prototype = {
+        isReplacing: true,
+        run: function (root) {
+            return this._visitor.visit(root);
+        },
+
+        visitRule: function (ruleNode, visitArgs) {
+            if (ruleNode.variable) {
+                return [];
+            }
+            return ruleNode;
+        },
+
+        visitMixinDefinition: function (mixinNode, visitArgs) {
+            // mixin definitions do not get eval'd - this means they keep state
+            // so we have to clear that state here so it isn't used if toCSS is called twice
+            mixinNode.frames = [];
+            return [];
+        },
+
+        visitExtend: function (extendNode, visitArgs) {
+            return [];
+        },
+
+        visitComment: function (commentNode, visitArgs) {
+            if (commentNode.isSilent(this._env)) {
+                return [];
+            }
+            return commentNode;
+        },
+
+        visitMedia: function(mediaNode, visitArgs) {
+            mediaNode.accept(this._visitor);
+            visitArgs.visitDeeper = false;
+
+            if (!mediaNode.rules.length) {
+                return [];
+            }
+            return mediaNode;
+        },
+
+        visitDirective: function(directiveNode, visitArgs) {
+            if (directiveNode.currentFileInfo.reference && !directiveNode.isReferenced) {
+                return [];
+            }
+            if (directiveNode.name === "@charset") {
+                // Only output the debug info together with subsequent @charset definitions
+                // a comment (or @media statement) before the actual @charset directive would
+                // be considered illegal css as it has to be on the first line
+                if (this.charset) {
+                    if (directiveNode.debugInfo) {
+                        var comment = new tree.Comment("/* " + directiveNode.toCSS(this._env).replace(/\n/g, "")+" */\n");
+                        comment.debugInfo = directiveNode.debugInfo;
+                        return this._visitor.visit(comment);
+                    }
+                    return [];
+                }
+                this.charset = true;
+            }
+            return directiveNode;
+        },
+
+        checkPropertiesInRoot: function(rules) {
+            var ruleNode;
+            for(var i = 0; i < rules.length; i++) {
+                ruleNode = rules[i];
+                if (ruleNode instanceof tree.Rule && !ruleNode.variable) {
+                    throw { message: "properties must be inside selector blocks, they cannot be in the root.",
+                        index: ruleNode.index, filename: ruleNode.currentFileInfo ? ruleNode.currentFileInfo.filename : null};
+                }
+            }
+        },
+
+        visitRuleset: function (rulesetNode, visitArgs) {
+            var rule, rulesets = [];
+            if (rulesetNode.firstRoot) {
+                this.checkPropertiesInRoot(rulesetNode.rules);
+            }
+            if (! rulesetNode.root) {
+                if (rulesetNode.paths) {
+                    rulesetNode.paths = rulesetNode.paths
+                        .filter(function(p) {
+                            var i;
+                            if (p[0].elements[0].combinator.value === ' ') {
+                                p[0].elements[0].combinator = new(tree.Combinator)('');
+                            }
+                            for(i = 0; i < p.length; i++) {
+                                if (p[i].getIsReferenced() && p[i].getIsOutput()) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        });
+                }
+
+                // Compile rules and rulesets
+                var nodeRules = rulesetNode.rules, nodeRuleCnt = nodeRules ? nodeRules.length : 0;
+                for (var i = 0; i < nodeRuleCnt; ) {
+                    rule = nodeRules[i];
+                    if (rule && rule.rules) {
+                        // visit because we are moving them out from being a child
+                        rulesets.push(this._visitor.visit(rule));
+                        nodeRules.splice(i, 1);
+                        nodeRuleCnt--;
+                        continue;
+                    }
+                    i++;
+                }
+                // accept the visitor to remove rules and refactor itself
+                // then we can decide now whether we want it or not
+                if (nodeRuleCnt > 0) {
+                    rulesetNode.accept(this._visitor);
+                } else {
+                    rulesetNode.rules = null;
+                }
+                visitArgs.visitDeeper = false;
+
+                nodeRules = rulesetNode.rules;
+                if (nodeRules) {
+                    this._mergeRules(nodeRules);
+                    nodeRules = rulesetNode.rules;
+                }
+                if (nodeRules) {
+                    this._removeDuplicateRules(nodeRules);
+                    nodeRules = rulesetNode.rules;
+                }
+
+                // now decide whether we keep the ruleset
+                if (nodeRules && nodeRules.length > 0 && rulesetNode.paths.length > 0) {
+                    rulesets.splice(0, 0, rulesetNode);
+                }
+            } else {
+                rulesetNode.accept(this._visitor);
+                visitArgs.visitDeeper = false;
+                if (rulesetNode.firstRoot || (rulesetNode.rules && rulesetNode.rules.length > 0)) {
+                    rulesets.splice(0, 0, rulesetNode);
+                }
+            }
+            if (rulesets.length === 1) {
+                return rulesets[0];
+            }
+            return rulesets;
+        },
+
+        _removeDuplicateRules: function(rules) {
+            if (!rules) { return; }
+
+            // remove duplicates
+            var ruleCache = {},
+                ruleList, rule, i;
+
+            for(i = rules.length - 1; i >= 0 ; i--) {
+                rule = rules[i];
+                if (rule instanceof tree.Rule) {
+                    if (!ruleCache[rule.name]) {
+                        ruleCache[rule.name] = rule;
+                    } else {
+                        ruleList = ruleCache[rule.name];
+                        if (ruleList instanceof tree.Rule) {
+                            ruleList = ruleCache[rule.name] = [ruleCache[rule.name].toCSS(this._env)];
+                        }
+                        var ruleCSS = rule.toCSS(this._env);
+                        if (ruleList.indexOf(ruleCSS) !== -1) {
+                            rules.splice(i, 1);
+                        } else {
+                            ruleList.push(ruleCSS);
+                        }
+                    }
+                }
+            }
+        },
+
+        _mergeRules: function (rules) {
+            if (!rules) { return; }
+
+            var groups = {},
+                parts,
+                rule,
+                key;
+
+            for (var i = 0; i < rules.length; i++) {
+                rule = rules[i];
+
+                if ((rule instanceof tree.Rule) && rule.merge) {
+                    key = [rule.name,
+                        rule.important ? "!" : ""].join(",");
+
+                    if (!groups[key]) {
+                        groups[key] = [];
+                    } else {
+                        rules.splice(i--, 1);
+                    }
+
+                    groups[key].push(rule);
+                }
+            }
+
+            Object.keys(groups).map(function (k) {
+
+                function toExpression(values) {
+                    return new (tree.Expression)(values.map(function (p) {
+                        return p.value;
+                    }));
+                }
+
+                function toValue(values) {
+                    return new (tree.Value)(values.map(function (p) {
+                        return p;
+                    }));
+                }
+
+                parts = groups[k];
+
+                if (parts.length > 1) {
+                    rule = parts[0];
+                    var spacedGroups = [];
+                    var lastSpacedGroup = [];
+                    parts.map(function (p) {
+                    if (p.merge==="+") {
+                        if (lastSpacedGroup.length > 0) {
+                                spacedGroups.push(toExpression(lastSpacedGroup));
+                            }
+                            lastSpacedGroup = [];
+                        }
+                        lastSpacedGroup.push(p);
+                    });
+                    spacedGroups.push(toExpression(lastSpacedGroup));
+                    rule.value = toValue(spacedGroups);
+                }
+            });
+        }
+    };
+
+})(require('./tree'));
+(function (tree) {
+    /*jshint loopfunc:true */
+
+    tree.extendFinderVisitor = function() {
+        this._visitor = new tree.visitor(this);
+        this.contexts = [];
+        this.allExtendsStack = [[]];
+    };
+
+    tree.extendFinderVisitor.prototype = {
+        run: function (root) {
+            root = this._visitor.visit(root);
+            root.allExtends = this.allExtendsStack[0];
+            return root;
+        },
+        visitRule: function (ruleNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+        visitMixinDefinition: function (mixinDefinitionNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+        visitRuleset: function (rulesetNode, visitArgs) {
+            if (rulesetNode.root) {
+                return;
+            }
+
+            var i, j, extend, allSelectorsExtendList = [], extendList;
+
+            // get &:extend(.a); rules which apply to all selectors in this ruleset
+            var rules = rulesetNode.rules, ruleCnt = rules ? rules.length : 0;
+            for(i = 0; i < ruleCnt; i++) {
+                if (rulesetNode.rules[i] instanceof tree.Extend) {
+                    allSelectorsExtendList.push(rules[i]);
+                    rulesetNode.extendOnEveryPath = true;
+                }
+            }
+
+            // now find every selector and apply the extends that apply to all extends
+            // and the ones which apply to an individual extend
+            var paths = rulesetNode.paths;
+            for(i = 0; i < paths.length; i++) {
+                var selectorPath = paths[i],
+                    selector = selectorPath[selectorPath.length - 1],
+                    selExtendList = selector.extendList;
+
+                extendList = selExtendList ? selExtendList.slice(0).concat(allSelectorsExtendList)
+                                           : allSelectorsExtendList;
+
+                if (extendList) {
+                    extendList = extendList.map(function(allSelectorsExtend) {
+                        return allSelectorsExtend.clone();
+                    });
+                }
+
+                for(j = 0; j < extendList.length; j++) {
+                    this.foundExtends = true;
+                    extend = extendList[j];
+                    extend.findSelfSelectors(selectorPath);
+                    extend.ruleset = rulesetNode;
+                    if (j === 0) { extend.firstExtendOnThisSelectorPath = true; }
+                    this.allExtendsStack[this.allExtendsStack.length-1].push(extend);
+                }
+            }
+
+            this.contexts.push(rulesetNode.selectors);
+        },
+        visitRulesetOut: function (rulesetNode) {
+            if (!rulesetNode.root) {
+                this.contexts.length = this.contexts.length - 1;
+            }
+        },
+        visitMedia: function (mediaNode, visitArgs) {
+            mediaNode.allExtends = [];
+            this.allExtendsStack.push(mediaNode.allExtends);
+        },
+        visitMediaOut: function (mediaNode) {
+            this.allExtendsStack.length = this.allExtendsStack.length - 1;
+        },
+        visitDirective: function (directiveNode, visitArgs) {
+            directiveNode.allExtends = [];
+            this.allExtendsStack.push(directiveNode.allExtends);
+        },
+        visitDirectiveOut: function (directiveNode) {
+            this.allExtendsStack.length = this.allExtendsStack.length - 1;
+        }
+    };
+
+    tree.processExtendsVisitor = function() {
+        this._visitor = new tree.visitor(this);
+    };
+
+    tree.processExtendsVisitor.prototype = {
+        run: function(root) {
+            var extendFinder = new tree.extendFinderVisitor();
+            extendFinder.run(root);
+            if (!extendFinder.foundExtends) { return root; }
+            root.allExtends = root.allExtends.concat(this.doExtendChaining(root.allExtends, root.allExtends));
+            this.allExtendsStack = [root.allExtends];
+            return this._visitor.visit(root);
+        },
+        doExtendChaining: function (extendsList, extendsListTarget, iterationCount) {
+            //
+            // chaining is different from normal extension.. if we extend an extend then we are not just copying, altering and pasting
+            // the selector we would do normally, but we are also adding an extend with the same target selector
+            // this means this new extend can then go and alter other extends
+            //
+            // this method deals with all the chaining work - without it, extend is flat and doesn't work on other extend selectors
+            // this is also the most expensive.. and a match on one selector can cause an extension of a selector we had already processed if
+            // we look at each selector at a time, as is done in visitRuleset
+
+            var extendIndex, targetExtendIndex, matches, extendsToAdd = [], newSelector, extendVisitor = this, selectorPath, extend, targetExtend, newExtend;
+
+            iterationCount = iterationCount || 0;
+
+            //loop through comparing every extend with every target extend.
+            // a target extend is the one on the ruleset we are looking at copy/edit/pasting in place
+            // e.g.  .a:extend(.b) {}  and .b:extend(.c) {} then the first extend extends the second one
+            // and the second is the target.
+            // the seperation into two lists allows us to process a subset of chains with a bigger set, as is the
+            // case when processing media queries
+            for(extendIndex = 0; extendIndex < extendsList.length; extendIndex++){
+                for(targetExtendIndex = 0; targetExtendIndex < extendsListTarget.length; targetExtendIndex++){
+
+                    extend = extendsList[extendIndex];
+                    targetExtend = extendsListTarget[targetExtendIndex];
+
+                    // look for circular references
+                    if( extend.parent_ids.indexOf( targetExtend.object_id ) >= 0 ){ continue; }
+
+                    // find a match in the target extends self selector (the bit before :extend)
+                    selectorPath = [targetExtend.selfSelectors[0]];
+                    matches = extendVisitor.findMatch(extend, selectorPath);
+
+                    if (matches.length) {
+
+                        // we found a match, so for each self selector..
+                        extend.selfSelectors.forEach(function(selfSelector) {
+
+                            // process the extend as usual
+                            newSelector = extendVisitor.extendSelector(matches, selectorPath, selfSelector);
+
+                            // but now we create a new extend from it
+                            newExtend = new(tree.Extend)(targetExtend.selector, targetExtend.option, 0);
+                            newExtend.selfSelectors = newSelector;
+
+                            // add the extend onto the list of extends for that selector
+                            newSelector[newSelector.length-1].extendList = [newExtend];
+
+                            // record that we need to add it.
+                            extendsToAdd.push(newExtend);
+                            newExtend.ruleset = targetExtend.ruleset;
+
+                            //remember its parents for circular references
+                            newExtend.parent_ids = newExtend.parent_ids.concat(targetExtend.parent_ids, extend.parent_ids);
+
+                            // only process the selector once.. if we have :extend(.a,.b) then multiple
+                            // extends will look at the same selector path, so when extending
+                            // we know that any others will be duplicates in terms of what is added to the css
+                            if (targetExtend.firstExtendOnThisSelectorPath) {
+                                newExtend.firstExtendOnThisSelectorPath = true;
+                                targetExtend.ruleset.paths.push(newSelector);
+                            }
+                        });
+                    }
+                }
+            }
+
+            if (extendsToAdd.length) {
+                // try to detect circular references to stop a stack overflow.
+                // may no longer be needed.
+                this.extendChainCount++;
+                if (iterationCount > 100) {
+                    var selectorOne = "{unable to calculate}";
+                    var selectorTwo = "{unable to calculate}";
+                    try
+                    {
+                        selectorOne = extendsToAdd[0].selfSelectors[0].toCSS();
+                        selectorTwo = extendsToAdd[0].selector.toCSS();
+                    }
+                    catch(e) {}
+                    throw {message: "extend circular reference detected. One of the circular extends is currently:"+selectorOne+":extend(" + selectorTwo+")"};
+                }
+
+                // now process the new extends on the existing rules so that we can handle a extending b extending c ectending d extending e...
+                return extendsToAdd.concat(extendVisitor.doExtendChaining(extendsToAdd, extendsListTarget, iterationCount+1));
+            } else {
+                return extendsToAdd;
+            }
+        },
+        visitRule: function (ruleNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+        visitMixinDefinition: function (mixinDefinitionNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+        visitSelector: function (selectorNode, visitArgs) {
+            visitArgs.visitDeeper = false;
+        },
+        visitRuleset: function (rulesetNode, visitArgs) {
+            if (rulesetNode.root) {
+                return;
+            }
+            var matches, pathIndex, extendIndex, allExtends = this.allExtendsStack[this.allExtendsStack.length-1], selectorsToAdd = [], extendVisitor = this, selectorPath;
+
+            // look at each selector path in the ruleset, find any extend matches and then copy, find and replace
+
+            for(extendIndex = 0; extendIndex < allExtends.length; extendIndex++) {
+                for(pathIndex = 0; pathIndex < rulesetNode.paths.length; pathIndex++) {
+                    selectorPath = rulesetNode.paths[pathIndex];
+
+                    // extending extends happens initially, before the main pass
+                    if (rulesetNode.extendOnEveryPath) { continue; }
+                    var extendList = selectorPath[selectorPath.length-1].extendList;
+                    if (extendList && extendList.length) { continue; }
+
+                    matches = this.findMatch(allExtends[extendIndex], selectorPath);
+
+                    if (matches.length) {
+
+                        allExtends[extendIndex].selfSelectors.forEach(function(selfSelector) {
+                            selectorsToAdd.push(extendVisitor.extendSelector(matches, selectorPath, selfSelector));
+                        });
+                    }
+                }
+            }
+            rulesetNode.paths = rulesetNode.paths.concat(selectorsToAdd);
+        },
+        findMatch: function (extend, haystackSelectorPath) {
+            //
+            // look through the haystack selector path to try and find the needle - extend.selector
+            // returns an array of selector matches that can then be replaced
+            //
+            var haystackSelectorIndex, hackstackSelector, hackstackElementIndex, haystackElement,
+                targetCombinator, i,
+                extendVisitor = this,
+                needleElements = extend.selector.elements,
+                potentialMatches = [], potentialMatch, matches = [];
+
+            // loop through the haystack elements
+            for(haystackSelectorIndex = 0; haystackSelectorIndex < haystackSelectorPath.length; haystackSelectorIndex++) {
+                hackstackSelector = haystackSelectorPath[haystackSelectorIndex];
+
+                for(hackstackElementIndex = 0; hackstackElementIndex < hackstackSelector.elements.length; hackstackElementIndex++) {
+
+                    haystackElement = hackstackSelector.elements[hackstackElementIndex];
+
+                    // if we allow elements before our match we can add a potential match every time. otherwise only at the first element.
+                    if (extend.allowBefore || (haystackSelectorIndex === 0 && hackstackElementIndex === 0)) {
+                        potentialMatches.push({pathIndex: haystackSelectorIndex, index: hackstackElementIndex, matched: 0, initialCombinator: haystackElement.combinator});
+                    }
+
+                    for(i = 0; i < potentialMatches.length; i++) {
+                        potentialMatch = potentialMatches[i];
+
+                        // selectors add " " onto the first element. When we use & it joins the selectors together, but if we don't
+                        // then each selector in haystackSelectorPath has a space before it added in the toCSS phase. so we need to work out
+                        // what the resulting combinator will be
+                        targetCombinator = haystackElement.combinator.value;
+                        if (targetCombinator === '' && hackstackElementIndex === 0) {
+                            targetCombinator = ' ';
+                        }
+
+                        // if we don't match, null our match to indicate failure
+                        if (!extendVisitor.isElementValuesEqual(needleElements[potentialMatch.matched].value, haystackElement.value) ||
+                            (potentialMatch.matched > 0 && needleElements[potentialMatch.matched].combinator.value !== targetCombinator)) {
+                            potentialMatch = null;
+                        } else {
+                            potentialMatch.matched++;
+                        }
+
+                        // if we are still valid and have finished, test whether we have elements after and whether these are allowed
+                        if (potentialMatch) {
+                            potentialMatch.finished = potentialMatch.matched === needleElements.length;
+                            if (potentialMatch.finished &&
+                                (!extend.allowAfter && (hackstackElementIndex+1 < hackstackSelector.elements.length || haystackSelectorIndex+1 < haystackSelectorPath.length))) {
+                                potentialMatch = null;
+                            }
+                        }
+                        // if null we remove, if not, we are still valid, so either push as a valid match or continue
+                        if (potentialMatch) {
+                            if (potentialMatch.finished) {
+                                potentialMatch.length = needleElements.length;
+                                potentialMatch.endPathIndex = haystackSelectorIndex;
+                                potentialMatch.endPathElementIndex = hackstackElementIndex + 1; // index after end of match
+                                potentialMatches.length = 0; // we don't allow matches to overlap, so start matching again
+                                matches.push(potentialMatch);
+                            }
+                        } else {
+                            potentialMatches.splice(i, 1);
+                            i--;
+                        }
+                    }
+                }
+            }
+            return matches;
+        },
+        isElementValuesEqual: function(elementValue1, elementValue2) {
+            if (typeof elementValue1 === "string" || typeof elementValue2 === "string") {
+                return elementValue1 === elementValue2;
+            }
+            if (elementValue1 instanceof tree.Attribute) {
+                if (elementValue1.op !== elementValue2.op || elementValue1.key !== elementValue2.key) {
+                    return false;
+                }
+                if (!elementValue1.value || !elementValue2.value) {
+                    if (elementValue1.value || elementValue2.value) {
+                        return false;
+                    }
+                    return true;
+                }
+                elementValue1 = elementValue1.value.value || elementValue1.value;
+                elementValue2 = elementValue2.value.value || elementValue2.value;
+                return elementValue1 === elementValue2;
+            }
+            elementValue1 = elementValue1.value;
+            elementValue2 = elementValue2.value;
+            if (elementValue1 instanceof tree.Selector) {
+                if (!(elementValue2 instanceof tree.Selector) || elementValue1.elements.length !== elementValue2.elements.length) {
+                    return false;
+                }
+                for(var i = 0; i <elementValue1.elements.length; i++) {
+                    if (elementValue1.elements[i].combinator.value !== elementValue2.elements[i].combinator.value) {
+                        if (i !== 0 || (elementValue1.elements[i].combinator.value || ' ') !== (elementValue2.elements[i].combinator.value || ' ')) {
+                            return false;
+                        }
+                    }
+                    if (!this.isElementValuesEqual(elementValue1.elements[i].value, elementValue2.elements[i].value)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        },
+        extendSelector:function (matches, selectorPath, replacementSelector) {
+
+            //for a set of matches, replace each match with the replacement selector
+
+            var currentSelectorPathIndex = 0,
+                currentSelectorPathElementIndex = 0,
+                path = [],
+                matchIndex,
+                selector,
+                firstElement,
+                match,
+                newElements;
+
+            for (matchIndex = 0; matchIndex < matches.length; matchIndex++) {
+                match = matches[matchIndex];
+                selector = selectorPath[match.pathIndex];
+                firstElement = new tree.Element(
+                    match.initialCombinator,
+                    replacementSelector.elements[0].value,
+                    replacementSelector.elements[0].index,
+                    replacementSelector.elements[0].currentFileInfo
+                );
+
+                if (match.pathIndex > currentSelectorPathIndex && currentSelectorPathElementIndex > 0) {
+                    path[path.length - 1].elements = path[path.length - 1].elements.concat(selectorPath[currentSelectorPathIndex].elements.slice(currentSelectorPathElementIndex));
+                    currentSelectorPathElementIndex = 0;
+                    currentSelectorPathIndex++;
+                }
+
+                newElements = selector.elements
+                    .slice(currentSelectorPathElementIndex, match.index)
+                    .concat([firstElement])
+                    .concat(replacementSelector.elements.slice(1));
+
+                if (currentSelectorPathIndex === match.pathIndex && matchIndex > 0) {
+                    path[path.length - 1].elements =
+                        path[path.length - 1].elements.concat(newElements);
+                } else {
+                    path = path.concat(selectorPath.slice(currentSelectorPathIndex, match.pathIndex));
+
+                    path.push(new tree.Selector(
+                        newElements
+                    ));
+                }
+                currentSelectorPathIndex = match.endPathIndex;
+                currentSelectorPathElementIndex = match.endPathElementIndex;
+                if (currentSelectorPathElementIndex >= selectorPath[currentSelectorPathIndex].elements.length) {
+                    currentSelectorPathElementIndex = 0;
+                    currentSelectorPathIndex++;
+                }
+            }
+
+            if (currentSelectorPathIndex < selectorPath.length && currentSelectorPathElementIndex > 0) {
+                path[path.length - 1].elements = path[path.length - 1].elements.concat(selectorPath[currentSelectorPathIndex].elements.slice(currentSelectorPathElementIndex));
+                currentSelectorPathIndex++;
+            }
+
+            path = path.concat(selectorPath.slice(currentSelectorPathIndex, selectorPath.length));
+
+            return path;
+        },
+        visitRulesetOut: function (rulesetNode) {
+        },
+        visitMedia: function (mediaNode, visitArgs) {
+            var newAllExtends = mediaNode.allExtends.concat(this.allExtendsStack[this.allExtendsStack.length-1]);
+            newAllExtends = newAllExtends.concat(this.doExtendChaining(newAllExtends, mediaNode.allExtends));
+            this.allExtendsStack.push(newAllExtends);
+        },
+        visitMediaOut: function (mediaNode) {
+            this.allExtendsStack.length = this.allExtendsStack.length - 1;
+        },
+        visitDirective: function (directiveNode, visitArgs) {
+            var newAllExtends = directiveNode.allExtends.concat(this.allExtendsStack[this.allExtendsStack.length-1]);
+            newAllExtends = newAllExtends.concat(this.doExtendChaining(newAllExtends, directiveNode.allExtends));
+            this.allExtendsStack.push(newAllExtends);
+        },
+        visitDirectiveOut: function (directiveNode) {
+            this.allExtendsStack.length = this.allExtendsStack.length - 1;
+        }
+    };
+
+})(require('./tree'));
+
+(function (tree) {
+
+    tree.sourceMapOutput = function (options) {
+        this._css = [];
+        this._rootNode = options.rootNode;
+        this._writeSourceMap = options.writeSourceMap;
+        this._contentsMap = options.contentsMap;
+        this._contentsIgnoredCharsMap = options.contentsIgnoredCharsMap;
+        this._sourceMapFilename = options.sourceMapFilename;
+        this._outputFilename = options.outputFilename;
+        this._sourceMapURL = options.sourceMapURL;
+        if (options.sourceMapBasepath) {
+            this._sourceMapBasepath = options.sourceMapBasepath.replace(/\\/g, '/');
+        }
+        this._sourceMapRootpath = options.sourceMapRootpath;
+        this._outputSourceFiles = options.outputSourceFiles;
+        this._sourceMapGeneratorConstructor = options.sourceMapGenerator || require("source-map").SourceMapGenerator;
+
+        if (this._sourceMapRootpath && this._sourceMapRootpath.charAt(this._sourceMapRootpath.length-1) !== '/') {
+            this._sourceMapRootpath += '/';
+        }
+
+        this._lineNumber = 0;
+        this._column = 0;
+    };
+
+    tree.sourceMapOutput.prototype.normalizeFilename = function(filename) {
+        filename = filename.replace(/\\/g, '/');
+
+        if (this._sourceMapBasepath && filename.indexOf(this._sourceMapBasepath) === 0) {
+            filename = filename.substring(this._sourceMapBasepath.length);
+            if (filename.charAt(0) === '\\' || filename.charAt(0) === '/') {
+               filename = filename.substring(1);
+            }
+        }
+        return (this._sourceMapRootpath || "") + filename;
+    };
+
+    tree.sourceMapOutput.prototype.add = function(chunk, fileInfo, index, mapLines) {
+
+        //ignore adding empty strings
+        if (!chunk) {
+            return;
+        }
+
+        var lines,
+            sourceLines,
+            columns,
+            sourceColumns,
+            i;
+
+        if (fileInfo) {
+            var inputSource = this._contentsMap[fileInfo.filename];
+            
+            // remove vars/banner added to the top of the file
+            if (this._contentsIgnoredCharsMap[fileInfo.filename]) {
+                // adjust the index
+                index -= this._contentsIgnoredCharsMap[fileInfo.filename];
+                if (index < 0) { index = 0; }
+                // adjust the source
+                inputSource = inputSource.slice(this._contentsIgnoredCharsMap[fileInfo.filename]);
+            }
+            inputSource = inputSource.substring(0, index);
+            sourceLines = inputSource.split("\n");
+            sourceColumns = sourceLines[sourceLines.length-1];
+        }
+
+        lines = chunk.split("\n");
+        columns = lines[lines.length-1];
+
+        if (fileInfo) {
+            if (!mapLines) {
+                this._sourceMapGenerator.addMapping({ generated: { line: this._lineNumber + 1, column: this._column},
+                    original: { line: sourceLines.length, column: sourceColumns.length},
+                    source: this.normalizeFilename(fileInfo.filename)});
+            } else {
+                for(i = 0; i < lines.length; i++) {
+                    this._sourceMapGenerator.addMapping({ generated: { line: this._lineNumber + i + 1, column: i === 0 ? this._column : 0},
+                        original: { line: sourceLines.length + i, column: i === 0 ? sourceColumns.length : 0},
+                        source: this.normalizeFilename(fileInfo.filename)});
+                }
+            }
+        }
+
+        if (lines.length === 1) {
+            this._column += columns.length;
+        } else {
+            this._lineNumber += lines.length - 1;
+            this._column = columns.length;
+        }
+
+        this._css.push(chunk);
+    };
+
+    tree.sourceMapOutput.prototype.isEmpty = function() {
+        return this._css.length === 0;
+    };
+
+    tree.sourceMapOutput.prototype.toCSS = function(env) {
+        this._sourceMapGenerator = new this._sourceMapGeneratorConstructor({ file: this._outputFilename, sourceRoot: null });
+
+        if (this._outputSourceFiles) {
+            for(var filename in this._contentsMap) {
+                if (this._contentsMap.hasOwnProperty(filename))
+                {
+                    var source = this._contentsMap[filename];
+                    if (this._contentsIgnoredCharsMap[filename]) {
+                        source = source.slice(this._contentsIgnoredCharsMap[filename]);
+                    }
+                    this._sourceMapGenerator.setSourceContent(this.normalizeFilename(filename), source);
+                }
+            }
+        }
+
+        this._rootNode.genCSS(env, this);
+
+        if (this._css.length > 0) {
+            var sourceMapURL,
+                sourceMapContent = JSON.stringify(this._sourceMapGenerator.toJSON());
+
+            if (this._sourceMapURL) {
+                sourceMapURL = this._sourceMapURL;
+            } else if (this._sourceMapFilename) {
+                sourceMapURL = this.normalizeFilename(this._sourceMapFilename);
+            }
+
+            if (this._writeSourceMap) {
+                this._writeSourceMap(sourceMapContent);
+            } else {
+                sourceMapURL = "data:application/json," + encodeURIComponent(sourceMapContent);
+            }
+
+            if (sourceMapURL) {
+                this._css.push("/*# sourceMappingURL=" + sourceMapURL + " */");
+            }
+        }
+
+        return this._css.join('');
+    };
+
+})(require('./tree'));
+
+//
+// browser.js - client-side engine
+//
+/*global less, window, document, XMLHttpRequest, location */
+
+var isFileProtocol = /^(file|chrome(-extension)?|resource|qrc|app):/.test(location.protocol);
+
+less.env = less.env || (location.hostname == '127.0.0.1' ||
+                        location.hostname == '0.0.0.0'   ||
+                        location.hostname == 'localhost' ||
+                        (location.port &&
+                          location.port.length > 0)      ||
+                        isFileProtocol                   ? 'development'
+                                                         : 'production');
+
+var logLevel = {
+    debug: 3,
+    info: 2,
+    errors: 1,
+    none: 0
+};
+
+// The amount of logging in the javascript console.
+// 3 - Debug, information and errors
+// 2 - Information and errors
+// 1 - Errors
+// 0 - None
+// Defaults to 2
+less.logLevel = typeof(less.logLevel) != 'undefined' ? less.logLevel : (less.env === 'development' ?  logLevel.debug : logLevel.errors);
+
+// Load styles asynchronously (default: false)
+//
+// This is set to `false` by default, so that the body
+// doesn't start loading before the stylesheets are parsed.
+// Setting this to `true` can result in flickering.
+//
+less.async = less.async || false;
+less.fileAsync = less.fileAsync || false;
+
+// Interval between watch polls
+less.poll = less.poll || (isFileProtocol ? 1000 : 1500);
+
+//Setup user functions
+if (less.functions) {
+    for(var func in less.functions) {
+        if (less.functions.hasOwnProperty(func)) {
+            less.tree.functions[func] = less.functions[func];
+        }
+   }
+}
+
+var dumpLineNumbers = /!dumpLineNumbers:(comments|mediaquery|all)/.exec(location.hash);
+if (dumpLineNumbers) {
+    less.dumpLineNumbers = dumpLineNumbers[1];
+}
+
+var typePattern = /^text\/(x-)?less$/;
+var cache = null;
+var fileCache = {};
+
+function log(str, level) {
+    if (typeof(console) !== 'undefined' && less.logLevel >= level) {
+        console.log('less: ' + str);
+    }
+}
+
+function extractId(href) {
+    return href.replace(/^[a-z-]+:\/+?[^\/]+/, '' )  // Remove protocol & domain
+        .replace(/^\//,                 '' )  // Remove root /
+        .replace(/\.[a-zA-Z]+$/,        '' )  // Remove simple extension
+        .replace(/[^\.\w-]+/g,          '-')  // Replace illegal characters
+        .replace(/\./g,                 ':'); // Replace dots with colons(for valid id)
+}
+
+function errorConsole(e, rootHref) {
+    var template = '{line} {content}';
+    var filename = e.filename || rootHref;
+    var errors = [];
+    var content = (e.type || "Syntax") + "Error: " + (e.message || 'There is an error in your .less file') +
+        " in " + filename + " ";
+
+    var errorline = function (e, i, classname) {
+        if (e.extract[i] !== undefined) {
+            errors.push(template.replace(/\{line\}/, (parseInt(e.line, 10) || 0) + (i - 1))
+                .replace(/\{class\}/, classname)
+                .replace(/\{content\}/, e.extract[i]));
+        }
+    };
+
+    if (e.extract) {
+        errorline(e, 0, '');
+        errorline(e, 1, 'line');
+        errorline(e, 2, '');
+        content += 'on line ' + e.line + ', column ' + (e.column + 1) + ':\n' +
+            errors.join('\n');
+    } else if (e.stack) {
+        content += e.stack;
+    }
+    log(content, logLevel.errors);
+}
+
+function createCSS(styles, sheet, lastModified) {
+    // Strip the query-string
+    var href = sheet.href || '';
+
+    // If there is no title set, use the filename, minus the extension
+    var id = 'less:' + (sheet.title || extractId(href));
+
+    // If this has already been inserted into the DOM, we may need to replace it
+    var oldCss = document.getElementById(id);
+    var keepOldCss = false;
+
+    // Create a new stylesheet node for insertion or (if necessary) replacement
+    var css = document.createElement('style');
+    css.setAttribute('type', 'text/css');
+    if (sheet.media) {
+        css.setAttribute('media', sheet.media);
+    }
+    css.id = id;
+
+    if (css.styleSheet) { // IE
+        try {
+            css.styleSheet.cssText = styles;
+        } catch (e) {
+            throw new(Error)("Couldn't reassign styleSheet.cssText.");
+        }
+    } else {
+        css.appendChild(document.createTextNode(styles));
+
+        // If new contents match contents of oldCss, don't replace oldCss
+        keepOldCss = (oldCss !== null && oldCss.childNodes.length > 0 && css.childNodes.length > 0 &&
+            oldCss.firstChild.nodeValue === css.firstChild.nodeValue);
+    }
+
+    var head = document.getElementsByTagName('head')[0];
+
+    // If there is no oldCss, just append; otherwise, only append if we need
+    // to replace oldCss with an updated stylesheet
+    if (oldCss === null || keepOldCss === false) {
+        var nextEl = sheet && sheet.nextSibling || null;
+        if (nextEl) {
+            nextEl.parentNode.insertBefore(css, nextEl);
+        } else {
+            head.appendChild(css);
+        }
+    }
+    if (oldCss && keepOldCss === false) {
+        oldCss.parentNode.removeChild(oldCss);
+    }
+
+    // Don't update the local store if the file wasn't modified
+    if (lastModified && cache) {
+        log('saving ' + href + ' to cache.', logLevel.info);
+        try {
+            cache.setItem(href, styles);
+            cache.setItem(href + ':timestamp', lastModified);
+        } catch(e) {
+            //TODO - could do with adding more robust error handling
+            log('failed to save', logLevel.errors);
+        }
+    }
+}
+
+function postProcessCSS(styles) {
+    if (less.postProcessor && typeof less.postProcessor === 'function') {
+        styles = less.postProcessor.call(styles, styles) || styles;
+    }
+    return styles;
+}
+
+function errorHTML(e, rootHref) {
+    var id = 'less-error-message:' + extractId(rootHref || "");
+    var template = '<li><label>{line}</label><pre class="{class}">{content}</pre></li>';
+    var elem = document.createElement('div'), timer, content, errors = [];
+    var filename = e.filename || rootHref;
+    var filenameNoPath = filename.match(/([^\/]+(\?.*)?)$/)[1];
+
+    elem.id        = id;
+    elem.className = "less-error-message";
+
+    content = '<h3>'  + (e.type || "Syntax") + "Error: " + (e.message || 'There is an error in your .less file') +
+        '</h3>' + '<p>in <a href="' + filename   + '">' + filenameNoPath + "</a> ";
+
+    var errorline = function (e, i, classname) {
+        if (e.extract[i] !== undefined) {
+            errors.push(template.replace(/\{line\}/, (parseInt(e.line, 10) || 0) + (i - 1))
+                .replace(/\{class\}/, classname)
+                .replace(/\{content\}/, e.extract[i]));
+        }
+    };
+
+    if (e.extract) {
+        errorline(e, 0, '');
+        errorline(e, 1, 'line');
+        errorline(e, 2, '');
+        content += 'on line ' + e.line + ', column ' + (e.column + 1) + ':</p>' +
+            '<ul>' + errors.join('') + '</ul>';
+    } else if (e.stack) {
+        content += '<br/>' + e.stack.split('\n').slice(1).join('<br/>');
+    }
+    elem.innerHTML = content;
+
+    // CSS for error messages
+    createCSS([
+        '.less-error-message ul, .less-error-message li {',
+        'list-style-type: none;',
+        'margin-right: 15px;',
+        'padding: 4px 0;',
+        'margin: 0;',
+        '}',
+        '.less-error-message label {',
+        'font-size: 12px;',
+        'margin-right: 15px;',
+        'padding: 4px 0;',
+        'color: #cc7777;',
+        '}',
+        '.less-error-message pre {',
+        'color: #dd6666;',
+        'padding: 4px 0;',
+        'margin: 0;',
+        'display: inline-block;',
+        '}',
+        '.less-error-message pre.line {',
+        'color: #ff0000;',
+        '}',
+        '.less-error-message h3 {',
+        'font-size: 20px;',
+        'font-weight: bold;',
+        'padding: 15px 0 5px 0;',
+        'margin: 0;',
+        '}',
+        '.less-error-message a {',
+        'color: #10a',
+        '}',
+        '.less-error-message .error {',
+        'color: red;',
+        'font-weight: bold;',
+        'padding-bottom: 2px;',
+        'border-bottom: 1px dashed red;',
+        '}'
+    ].join('\n'), { title: 'error-message' });
+
+    elem.style.cssText = [
+        "font-family: Arial, sans-serif",
+        "border: 1px solid #e00",
+        "background-color: #eee",
+        "border-radius: 5px",
+        "-webkit-border-radius: 5px",
+        "-moz-border-radius: 5px",
+        "color: #e00",
+        "padding: 15px",
+        "margin-bottom: 15px"
+    ].join(';');
+
+    if (less.env == 'development') {
+        timer = setInterval(function () {
+            if (document.body) {
+                if (document.getElementById(id)) {
+                    document.body.replaceChild(elem, document.getElementById(id));
+                } else {
+                    document.body.insertBefore(elem, document.body.firstChild);
+                }
+                clearInterval(timer);
+            }
+        }, 10);
+    }
+}
+
+function error(e, rootHref) {
+    if (!less.errorReporting || less.errorReporting === "html") {
+        errorHTML(e, rootHref);
+    } else if (less.errorReporting === "console") {
+        errorConsole(e, rootHref);
+    } else if (typeof less.errorReporting === 'function') {
+        less.errorReporting("add", e, rootHref);
+    }
+}
+
+function removeErrorHTML(path) {
+    var node = document.getElementById('less-error-message:' + extractId(path));
+    if (node) {
+        node.parentNode.removeChild(node);
+    }
+}
+
+function removeErrorConsole(path) {
+    //no action
+}
+
+function removeError(path) {
+    if (!less.errorReporting || less.errorReporting === "html") {
+        removeErrorHTML(path);
+    } else if (less.errorReporting === "console") {
+        removeErrorConsole(path);
+    } else if (typeof less.errorReporting === 'function') {
+        less.errorReporting("remove", path);
+    }
+}
+
+function loadStyles(modifyVars) {
+    var styles = document.getElementsByTagName('style'),
+        style;
+    for (var i = 0; i < styles.length; i++) {
+        style = styles[i];
+        if (style.type.match(typePattern)) {
+            var env = new less.tree.parseEnv(less),
+                lessText = style.innerHTML || '';
+            env.filename = document.location.href.replace(/#.*$/, '');
+
+            if (modifyVars || less.globalVars) {
+                env.useFileCache = true;
+            }
+
+            /*jshint loopfunc:true */
+            // use closure to store current value of i
+            var callback = (function(style) {
+                return function (e, cssAST) {
+                    if (e) {
+                        return error(e, "inline");
+                    }
+                    var css = cssAST.toCSS(less);
+                    style.type = 'text/css';
+                    if (style.styleSheet) {
+                        style.styleSheet.cssText = css;
+                    } else {
+                        style.innerHTML = css;
+                    }
+                };
+            })(style);
+            new(less.Parser)(env).parse(lessText, callback, {globalVars: less.globalVars, modifyVars: modifyVars});
+        }
+    }
+}
+
+function extractUrlParts(url, baseUrl) {
+    // urlParts[1] = protocol&hostname || /
+    // urlParts[2] = / if path relative to host base
+    // urlParts[3] = directories
+    // urlParts[4] = filename
+    // urlParts[5] = parameters
+
+    var urlPartsRegex = /^((?:[a-z-]+:)?\/+?(?:[^\/\?#]*\/)|([\/\\]))?((?:[^\/\\\?#]*[\/\\])*)([^\/\\\?#]*)([#\?].*)?$/i,
+        urlParts = url.match(urlPartsRegex),
+        returner = {}, directories = [], i, baseUrlParts;
+
+    if (!urlParts) {
+        throw new Error("Could not parse sheet href - '"+url+"'");
+    }
+
+    // Stylesheets in IE don't always return the full path
+    if (!urlParts[1] || urlParts[2]) {
+        baseUrlParts = baseUrl.match(urlPartsRegex);
+        if (!baseUrlParts) {
+            throw new Error("Could not parse page url - '"+baseUrl+"'");
+        }
+        urlParts[1] = urlParts[1] || baseUrlParts[1] || "";
+        if (!urlParts[2]) {
+            urlParts[3] = baseUrlParts[3] + urlParts[3];
+        }
+    }
+
+    if (urlParts[3]) {
+        directories = urlParts[3].replace(/\\/g, "/").split("/");
+
+        // extract out . before .. so .. doesn't absorb a non-directory
+        for(i = 0; i < directories.length; i++) {
+            if (directories[i] === ".") {
+                directories.splice(i, 1);
+                i -= 1;
+            }
+        }
+
+        for(i = 0; i < directories.length; i++) {
+            if (directories[i] === ".." && i > 0) {
+                directories.splice(i-1, 2);
+                i -= 2;
+            }
+        }
+    }
+
+    returner.hostPart = urlParts[1];
+    returner.directories = directories;
+    returner.path = urlParts[1] + directories.join("/");
+    returner.fileUrl = returner.path + (urlParts[4] || "");
+    returner.url = returner.fileUrl + (urlParts[5] || "");
+    return returner;
+}
+
+function pathDiff(url, baseUrl) {
+    // diff between two paths to create a relative path
+
+    var urlParts = extractUrlParts(url),
+        baseUrlParts = extractUrlParts(baseUrl),
+        i, max, urlDirectories, baseUrlDirectories, diff = "";
+    if (urlParts.hostPart !== baseUrlParts.hostPart) {
+        return "";
+    }
+    max = Math.max(baseUrlParts.directories.length, urlParts.directories.length);
+    for(i = 0; i < max; i++) {
+        if (baseUrlParts.directories[i] !== urlParts.directories[i]) { break; }
+    }
+    baseUrlDirectories = baseUrlParts.directories.slice(i);
+    urlDirectories = urlParts.directories.slice(i);
+    for(i = 0; i < baseUrlDirectories.length-1; i++) {
+        diff += "../";
+    }
+    for(i = 0; i < urlDirectories.length-1; i++) {
+        diff += urlDirectories[i] + "/";
+    }
+    return diff;
+}
+
+function getXMLHttpRequest() {
+    if (window.XMLHttpRequest && (window.location.protocol !== "file:" || !window.ActiveXObject)) {
+        return new XMLHttpRequest();
+    } else {
+        try {
+            /*global ActiveXObject */
+            return new ActiveXObject("Microsoft.XMLHTTP");
+        } catch (e) {
+            log("browser doesn't support AJAX.", logLevel.errors);
+            return null;
+        }
+    }
+}
+
+function doXHR(url, type, callback, errback) {
+    var xhr = getXMLHttpRequest();
+    var async = isFileProtocol ? less.fileAsync : less.async;
+
+    if (typeof(xhr.overrideMimeType) === 'function') {
+        xhr.overrideMimeType('text/css');
+    }
+    log("XHR: Getting '" + url + "'", logLevel.debug);
+    xhr.open('GET', url, async);
+    xhr.setRequestHeader('Accept', type || 'text/x-less, text/css; q=0.9, */*; q=0.5');
+    xhr.send(null);
+
+    function handleResponse(xhr, callback, errback) {
+        if (xhr.status >= 200 && xhr.status < 300) {
+            callback(xhr.responseText,
+                xhr.getResponseHeader("Last-Modified"));
+        } else if (typeof(errback) === 'function') {
+            errback(xhr.status, url);
+        }
+    }
+
+    if (isFileProtocol && !less.fileAsync) {
+        if (xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)) {
+            callback(xhr.responseText);
+        } else {
+            errback(xhr.status, url);
+        }
+    } else if (async) {
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState == 4) {
+                handleResponse(xhr, callback, errback);
+            }
+        };
+    } else {
+        handleResponse(xhr, callback, errback);
+    }
+}
+
+function loadFile(originalHref, currentFileInfo, callback, env, modifyVars) {
+
+    if (currentFileInfo && currentFileInfo.currentDirectory && !/^([a-z-]+:)?\//.test(originalHref)) {
+        originalHref = currentFileInfo.currentDirectory + originalHref;
+    }
+
+    // sheet may be set to the stylesheet for the initial load or a collection of properties including
+    // some env variables for imports
+    var hrefParts = extractUrlParts(originalHref, window.location.href);
+    var href      = hrefParts.url;
+    var newFileInfo = {
+        currentDirectory: hrefParts.path,
+        filename: href
+    };
+
+    if (currentFileInfo) {
+        newFileInfo.entryPath = currentFileInfo.entryPath;
+        newFileInfo.rootpath = currentFileInfo.rootpath;
+        newFileInfo.rootFilename = currentFileInfo.rootFilename;
+        newFileInfo.relativeUrls = currentFileInfo.relativeUrls;
+    } else {
+        newFileInfo.entryPath = hrefParts.path;
+        newFileInfo.rootpath = less.rootpath || hrefParts.path;
+        newFileInfo.rootFilename = href;
+        newFileInfo.relativeUrls = env.relativeUrls;
+    }
+
+    if (newFileInfo.relativeUrls) {
+        if (env.rootpath) {
+            newFileInfo.rootpath = extractUrlParts(env.rootpath + pathDiff(hrefParts.path, newFileInfo.entryPath)).path;
+        } else {
+            newFileInfo.rootpath = hrefParts.path;
+        }
+    }
+
+    if (env.useFileCache && fileCache[href]) {
+        try {
+            var lessText = fileCache[href];
+            callback(null, lessText, href, newFileInfo, { lastModified: new Date() });
+        } catch (e) {
+            callback(e, null, href);
+        }
+        return;
+    }
+
+    doXHR(href, env.mime, function (data, lastModified) {
+        // per file cache
+        fileCache[href] = data;
+
+        // Use remote copy (re-parse)
+        try {
+            callback(null, data, href, newFileInfo, { lastModified: lastModified });
+        } catch (e) {
+            callback(e, null, href);
+        }
+    }, function (status, url) {
+        callback({ type: 'File', message: "'" + url + "' wasn't found (" + status + ")" }, null, href);
+    });
+}
+
+function loadStyleSheet(sheet, callback, reload, remaining, modifyVars) {
+
+    var env = new less.tree.parseEnv(less);
+    env.mime = sheet.type;
+
+    if (modifyVars || less.globalVars) {
+        env.useFileCache = true;
+    }
+
+    loadFile(sheet.href, null, function(e, data, path, newFileInfo, webInfo) {
+
+        if (webInfo) {
+            webInfo.remaining = remaining;
+
+            var css       = cache && cache.getItem(path),
+                timestamp = cache && cache.getItem(path + ':timestamp');
+
+            if (!reload && timestamp && webInfo.lastModified &&
+                (new(Date)(webInfo.lastModified).valueOf() ===
+                    new(Date)(timestamp).valueOf())) {
+                // Use local copy
+                createCSS(css, sheet);
+                webInfo.local = true;
+                callback(null, null, data, sheet, webInfo, path);
+                return;
+            }
+        }
+
+        //TODO add tests around how this behaves when reloading
+        removeError(path);
+
+        if (data) {
+            env.currentFileInfo = newFileInfo;
+            new(less.Parser)(env).parse(data, function (e, root) {
+                if (e) { return callback(e, null, null, sheet); }
+                try {
+                    callback(e, root, data, sheet, webInfo, path);
+                } catch (e) {
+                    callback(e, null, null, sheet);
+                }
+            }, {modifyVars: modifyVars, globalVars: less.globalVars});
+        } else {
+            callback(e, null, null, sheet, webInfo, path);
+        }
+    }, env, modifyVars);
+}
+
+function loadStyleSheets(callback, reload, modifyVars) {
+    for (var i = 0; i < less.sheets.length; i++) {
+        loadStyleSheet(less.sheets[i], callback, reload, less.sheets.length - (i + 1), modifyVars);
+    }
+}
+
+function initRunningMode(){
+    if (less.env === 'development') {
+        less.optimization = 0;
+        less.watchTimer = setInterval(function () {
+            if (less.watchMode) {
+                loadStyleSheets(function (e, root, _, sheet, env) {
+                    if (e) {
+                        error(e, sheet.href);
+                    } else if (root) {
+                        var styles = root.toCSS(less);
+                        styles = postProcessCSS(styles);
+                        createCSS(styles, sheet, env.lastModified);
+                    }
+                });
+            }
+        }, less.poll);
+    } else {
+        less.optimization = 3;
+    }
+}
+
+
+
+//
+// Watch mode
+//
+less.watch   = function () {
+    if (!less.watchMode ){
+        less.env = 'development';
+         initRunningMode();
+    }
+    this.watchMode = true;
+    return true;
+};
+
+less.unwatch = function () {clearInterval(less.watchTimer); this.watchMode = false; return false; };
+
+if (/!watch/.test(location.hash)) {
+    less.watch();
+}
+
+if (less.env != 'development') {
+    try {
+        cache = (typeof(window.localStorage) === 'undefined') ? null : window.localStorage;
+    } catch (_) {}
+}
+
+//
+// Get all <link> tags with the 'rel' attribute set to "stylesheet/less"
+//
+var links = document.getElementsByTagName('link');
+
+less.sheets = [];
+
+for (var i = 0; i < links.length; i++) {
+    if (links[i].rel === 'stylesheet/less' || (links[i].rel.match(/stylesheet/) &&
+       (links[i].type.match(typePattern)))) {
+        less.sheets.push(links[i]);
+    }
+}
+
+//
+// With this function, it's possible to alter variables and re-render
+// CSS without reloading less-files
+//
+less.modifyVars = function(record) {
+    less.refresh(false, record);
+};
+
+less.refresh = function (reload, modifyVars) {
+    var startTime, endTime;
+    startTime = endTime = new Date();
+
+    loadStyleSheets(function (e, root, _, sheet, env) {
+        if (e) {
+            return error(e, sheet.href);
+        }
+        if (env.local) {
+            log("loading " + sheet.href + " from cache.", logLevel.info);
+        } else {
+            log("parsed " + sheet.href + " successfully.", logLevel.debug);
+            var styles = root.toCSS(less);
+            styles = postProcessCSS(styles);
+            createCSS(styles, sheet, env.lastModified);
+        }
+        log("css for " + sheet.href + " generated in " + (new Date() - endTime) + 'ms', logLevel.info);
+        if (env.remaining === 0) {
+            log("less has finished. css generated in " + (new Date() - startTime) + 'ms', logLevel.info);
+        }
+        endTime = new Date();
+    }, reload, modifyVars);
+
+    loadStyles(modifyVars);
+};
+
+less.refreshStyles = loadStyles;
+
+less.Parser.fileLoader = loadFile;
+
+less.refresh(less.env === 'development');
+
+// amd.js
+//
+// Define Less as an AMD module.
+if (typeof define === "function" && define.amd) {
+    define('lessc',[],function () { return less; } );
+}
+
+})(window);
+/*
+ * css.normalize.js
+ *
+ * CSS Normalization
+ *
+ * CSS paths are normalized based on an optional basePath and the RequireJS config
+ *
+ * Usage:
+ *   normalize(css, fromBasePath, toBasePath);
+ *
+ * css: the stylesheet content to normalize
+ * fromBasePath: the absolute base path of the css relative to any root (but without ../ backtracking)
+ * toBasePath: the absolute new base path of the css relative to the same root
+ * 
+ * Absolute dependencies are left untouched.
+ *
+ * Urls in the CSS are picked up by regular expressions.
+ * These will catch all statements of the form:
+ *
+ * url(*)
+ * url('*')
+ * url("*")
+ * 
+ * @import '*'
+ * @import "*"
+ *
+ * (and so also @import url(*) variations)
+ *
+ * For urls needing normalization
+ *
+ */
+
+define('normalize',[],function() {
+  
+  // regular expression for removing double slashes
+  // eg http://www.example.com//my///url/here -> http://www.example.com/my/url/here
+  var slashes = /([^:])\/+/g
+  var removeDoubleSlashes = function(uri) {
+    return uri.replace(slashes, '$1/');
+  }
+
+  // given a relative URI, and two absolute base URIs, convert it from one base to another
+  var protocolRegEx = /[^\:\/]*:\/\/([^\/])*/;
+  var absUrlRegEx = /^(\/|data:)/;
+  function convertURIBase(uri, fromBase, toBase) {
+    if (uri.match(absUrlRegEx) || uri.match(protocolRegEx))
+      return uri;
+    uri = removeDoubleSlashes(uri);
+    // if toBase specifies a protocol path, ensure this is the same protocol as fromBase, if not
+    // use absolute path at fromBase
+    var toBaseProtocol = toBase.match(protocolRegEx);
+    var fromBaseProtocol = fromBase.match(protocolRegEx);
+    if (fromBaseProtocol && (!toBaseProtocol || toBaseProtocol[1] != fromBaseProtocol[1] || toBaseProtocol[2] != fromBaseProtocol[2]))
+      return absoluteURI(uri, fromBase);
+    
+    else {
+      return relativeURI(absoluteURI(uri, fromBase), toBase);
+    }
+  };
+  
+  // given a relative URI, calculate the absolute URI
+  function absoluteURI(uri, base) {
+    if (uri.substr(0, 2) == './')
+      uri = uri.substr(2);
+
+    // absolute urls are left in tact
+    if (uri.match(absUrlRegEx) || uri.match(protocolRegEx))
+      return uri;
+    
+    var baseParts = base.split('/');
+    var uriParts = uri.split('/');
+    
+    baseParts.pop();
+    
+    while (curPart = uriParts.shift())
+      if (curPart == '..')
+        baseParts.pop();
+      else
+        baseParts.push(curPart);
+    
+    return baseParts.join('/');
+  };
+
+
+  // given an absolute URI, calculate the relative URI
+  function relativeURI(uri, base) {
+    
+    // reduce base and uri strings to just their difference string
+    var baseParts = base.split('/');
+    baseParts.pop();
+    base = baseParts.join('/') + '/';
+    i = 0;
+    while (base.substr(i, 1) == uri.substr(i, 1))
+      i++;
+    while (base.substr(i, 1) != '/')
+      i--;
+    base = base.substr(i + 1);
+    uri = uri.substr(i + 1);
+
+    // each base folder difference is thus a backtrack
+    baseParts = base.split('/');
+    var uriParts = uri.split('/');
+    out = '';
+    while (baseParts.shift())
+      out += '../';
+    
+    // finally add uri parts
+    while (curPart = uriParts.shift())
+      out += curPart + '/';
+    
+    return out.substr(0, out.length - 1);
+  };
+  
+  var normalizeCSS = function(source, fromBase, toBase) {
+
+    fromBase = removeDoubleSlashes(fromBase);
+    toBase = removeDoubleSlashes(toBase);
+
+    var urlRegEx = /@import\s*("([^"]*)"|'([^']*)')|url\s*\(\s*(\s*"([^"]*)"|'([^']*)'|[^\)]*\s*)\s*\)/ig;
+    var result, url, source;
+
+    while (result = urlRegEx.exec(source)) {
+      url = result[3] || result[2] || result[5] || result[6] || result[4];
+      var newUrl;
+      newUrl = convertURIBase(url, fromBase, toBase);
+      var quoteLen = result[5] || result[6] ? 1 : 0;
+      source = source.substr(0, urlRegEx.lastIndex - url.length - quoteLen - 1) + newUrl + source.substr(urlRegEx.lastIndex - quoteLen - 1);
+      urlRegEx.lastIndex = urlRegEx.lastIndex + (newUrl.length - url.length);
+    }
+    
+    return source;
+  };
+  
+  normalizeCSS.convertURIBase = convertURIBase;
+  normalizeCSS.absoluteURI = absoluteURI;
+  normalizeCSS.relativeURI = relativeURI;
+  
+  return normalizeCSS;
 });
 
 (function (global, factory) {
@@ -85429,8 +93490,8 @@ define('ThreeCSG',["three"], function( THREE ){
  * @returns {packL#5.packAnonym$1}
  */
 
-define('core',["json", "less", "three", "lodash", "jquery", "backbone", "cmd", "globals", "tween", "dat-gui", "plugin", "stats", "async", "ThreeCSG"], 
-function( json, less, THREE, _, $, Backbone, CMD, GLOBALS, TWEEN, dat, Plugin, Stats, async ) {
+define('core',["json", "less", "lessc", "normalize", "three", "lodash", "jquery", "backbone", "cmd", "globals", "tween", "dat-gui", "plugin", "stats", "async", "ThreeCSG"], 
+function( json, less, less, normalize, THREE, _, $, Backbone, CMD, GLOBALS, TWEEN, dat, Plugin, Stats, async ) {
     return {
         THREE       : THREE,
         _           : _,
@@ -88472,8475 +96533,6 @@ define('Viewport',["three", "lodash", "backbone", "cmd",
 });
 
 
-define('vendor/three/loaders/ColladaLoader',["three"], function(THREE){
-/**
- * @author mrdoob / http://mrdoob.com/
- * @author Mugen87 / https://github.com/Mugen87
- */
-
-THREE.ColladaLoader = function ( manager ) {
-
-	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
-
-};
-
-THREE.ColladaLoader.prototype = {
-
-	constructor: THREE.ColladaLoader,
-
-	crossOrigin: 'anonymous',
-
-	load: function ( url, onLoad, onProgress, onError ) {
-
-		var scope = this;
-
-		var path = ( scope.path === undefined ) ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
-
-		var loader = new THREE.FileLoader( scope.manager );
-		loader.setPath( scope.path );
-		loader.load( url, function ( text ) {
-
-			onLoad( scope.parse( text, path ) );
-
-		}, onProgress, onError );
-
-	},
-
-	setPath: function ( value ) {
-
-		this.path = value;
-		return this;
-
-	},
-
-	setResourcePath: function ( value ) {
-
-		this.resourcePath = value;
-		return this;
-
-	},
-
-	options: {
-
-		set convertUpAxis( value ) {
-
-			console.warn( 'THREE.ColladaLoader: options.convertUpAxis() has been removed. Up axis is converted automatically.' );
-
-		}
-
-	},
-
-	setCrossOrigin: function ( value ) {
-
-		this.crossOrigin = value;
-		return this;
-
-	},
-
-	parse: function ( text, path ) {
-
-		function getElementsByTagName( xml, name ) {
-
-			// Non recursive xml.getElementsByTagName() ...
-
-			var array = [];
-			var childNodes = xml.childNodes;
-
-			for ( var i = 0, l = childNodes.length; i < l; i ++ ) {
-
-				var child = childNodes[ i ];
-
-				if ( child.nodeName === name ) {
-
-					array.push( child );
-
-				}
-
-			}
-
-			return array;
-
-		}
-
-		function parseStrings( text ) {
-
-			if ( text.length === 0 ) return [];
-
-			var parts = text.trim().split( /\s+/ );
-			var array = new Array( parts.length );
-
-			for ( var i = 0, l = parts.length; i < l; i ++ ) {
-
-				array[ i ] = parts[ i ];
-
-			}
-
-			return array;
-
-		}
-
-		function parseFloats( text ) {
-
-			if ( text.length === 0 ) return [];
-
-			var parts = text.trim().split( /\s+/ );
-			var array = new Array( parts.length );
-
-			for ( var i = 0, l = parts.length; i < l; i ++ ) {
-
-				array[ i ] = parseFloat( parts[ i ] );
-
-			}
-
-			return array;
-
-		}
-
-		function parseInts( text ) {
-
-			if ( text.length === 0 ) return [];
-
-			var parts = text.trim().split( /\s+/ );
-			var array = new Array( parts.length );
-
-			for ( var i = 0, l = parts.length; i < l; i ++ ) {
-
-				array[ i ] = parseInt( parts[ i ] );
-
-			}
-
-			return array;
-
-		}
-
-		function parseId( text ) {
-
-			return text.substring( 1 );
-
-		}
-
-		function generateId() {
-
-			return 'three_default_' + ( count ++ );
-
-		}
-
-		function isEmpty( object ) {
-
-			return Object.keys( object ).length === 0;
-
-		}
-
-		// asset
-
-		function parseAsset( xml ) {
-
-			return {
-				unit: parseAssetUnit( getElementsByTagName( xml, 'unit' )[ 0 ] ),
-				upAxis: parseAssetUpAxis( getElementsByTagName( xml, 'up_axis' )[ 0 ] )
-			};
-
-		}
-
-		function parseAssetUnit( xml ) {
-
-			if ( ( xml !== undefined ) && ( xml.hasAttribute( 'meter' ) === true ) ) {
-
-				return parseFloat( xml.getAttribute( 'meter' ) );
-
-			} else {
-
-				return 1; // default 1 meter
-
-			}
-
-		}
-
-		function parseAssetUpAxis( xml ) {
-
-			return xml !== undefined ? xml.textContent : 'Y_UP';
-
-		}
-
-		// library
-
-		function parseLibrary( xml, libraryName, nodeName, parser ) {
-
-			var library = getElementsByTagName( xml, libraryName )[ 0 ];
-
-			if ( library !== undefined ) {
-
-				var elements = getElementsByTagName( library, nodeName );
-
-				for ( var i = 0; i < elements.length; i ++ ) {
-
-					parser( elements[ i ] );
-
-				}
-
-			}
-
-		}
-
-		function buildLibrary( data, builder ) {
-
-			for ( var name in data ) {
-
-				var object = data[ name ];
-				object.build = builder( data[ name ] );
-
-			}
-
-		}
-
-		// get
-
-		function getBuild( data, builder ) {
-
-			if ( data.build !== undefined ) return data.build;
-
-			data.build = builder( data );
-
-			return data.build;
-
-		}
-
-		// animation
-
-		function parseAnimation( xml ) {
-
-			var data = {
-				sources: {},
-				samplers: {},
-				channels: {}
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				var id;
-
-				switch ( child.nodeName ) {
-
-					case 'source':
-						id = child.getAttribute( 'id' );
-						data.sources[ id ] = parseSource( child );
-						break;
-
-					case 'sampler':
-						id = child.getAttribute( 'id' );
-						data.samplers[ id ] = parseAnimationSampler( child );
-						break;
-
-					case 'channel':
-						id = child.getAttribute( 'target' );
-						data.channels[ id ] = parseAnimationChannel( child );
-						break;
-
-					default:
-						console.log( child );
-
-				}
-
-			}
-
-			library.animations[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parseAnimationSampler( xml ) {
-
-			var data = {
-				inputs: {},
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'input':
-						var id = parseId( child.getAttribute( 'source' ) );
-						var semantic = child.getAttribute( 'semantic' );
-						data.inputs[ semantic ] = id;
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseAnimationChannel( xml ) {
-
-			var data = {};
-
-			var target = xml.getAttribute( 'target' );
-
-			// parsing SID Addressing Syntax
-
-			var parts = target.split( '/' );
-
-			var id = parts.shift();
-			var sid = parts.shift();
-
-			// check selection syntax
-
-			var arraySyntax = ( sid.indexOf( '(' ) !== - 1 );
-			var memberSyntax = ( sid.indexOf( '.' ) !== - 1 );
-
-			if ( memberSyntax ) {
-
-				//  member selection access
-
-				parts = sid.split( '.' );
-				sid = parts.shift();
-				data.member = parts.shift();
-
-			} else if ( arraySyntax ) {
-
-				// array-access syntax. can be used to express fields in one-dimensional vectors or two-dimensional matrices.
-
-				var indices = sid.split( '(' );
-				sid = indices.shift();
-
-				for ( var i = 0; i < indices.length; i ++ ) {
-
-					indices[ i ] = parseInt( indices[ i ].replace( /\)/, '' ) );
-
-				}
-
-				data.indices = indices;
-
-			}
-
-			data.id = id;
-			data.sid = sid;
-
-			data.arraySyntax = arraySyntax;
-			data.memberSyntax = memberSyntax;
-
-			data.sampler = parseId( xml.getAttribute( 'source' ) );
-
-			return data;
-
-		}
-
-		function buildAnimation( data ) {
-
-			var tracks = [];
-
-			var channels = data.channels;
-			var samplers = data.samplers;
-			var sources = data.sources;
-
-			for ( var target in channels ) {
-
-				if ( channels.hasOwnProperty( target ) ) {
-
-					var channel = channels[ target ];
-					var sampler = samplers[ channel.sampler ];
-
-					var inputId = sampler.inputs.INPUT;
-					var outputId = sampler.inputs.OUTPUT;
-
-					var inputSource = sources[ inputId ];
-					var outputSource = sources[ outputId ];
-
-					var animation = buildAnimationChannel( channel, inputSource, outputSource );
-
-					createKeyframeTracks( animation, tracks );
-
-				}
-
-			}
-
-			return tracks;
-
-		}
-
-		function getAnimation( id ) {
-
-			return getBuild( library.animations[ id ], buildAnimation );
-
-		}
-
-		function buildAnimationChannel( channel, inputSource, outputSource ) {
-
-			var node = library.nodes[ channel.id ];
-			var object3D = getNode( node.id );
-
-			var transform = node.transforms[ channel.sid ];
-			var defaultMatrix = node.matrix.clone().transpose();
-
-			var time, stride;
-			var i, il, j, jl;
-
-			var data = {};
-
-			// the collada spec allows the animation of data in various ways.
-			// depending on the transform type (matrix, translate, rotate, scale), we execute different logic
-
-			switch ( transform ) {
-
-				case 'matrix':
-
-					for ( i = 0, il = inputSource.array.length; i < il; i ++ ) {
-
-						time = inputSource.array[ i ];
-						stride = i * outputSource.stride;
-
-						if ( data[ time ] === undefined ) data[ time ] = {};
-
-						if ( channel.arraySyntax === true ) {
-
-							var value = outputSource.array[ stride ];
-							var index = channel.indices[ 0 ] + 4 * channel.indices[ 1 ];
-
-							data[ time ][ index ] = value;
-
-						} else {
-
-							for ( j = 0, jl = outputSource.stride; j < jl; j ++ ) {
-
-								data[ time ][ j ] = outputSource.array[ stride + j ];
-
-							}
-
-						}
-
-					}
-
-					break;
-
-				case 'translate':
-					console.warn( 'THREE.ColladaLoader: Animation transform type "%s" not yet implemented.', transform );
-					break;
-
-				case 'rotate':
-					console.warn( 'THREE.ColladaLoader: Animation transform type "%s" not yet implemented.', transform );
-					break;
-
-				case 'scale':
-					console.warn( 'THREE.ColladaLoader: Animation transform type "%s" not yet implemented.', transform );
-					break;
-
-			}
-
-			var keyframes = prepareAnimationData( data, defaultMatrix );
-
-			var animation = {
-				name: object3D.uuid,
-				keyframes: keyframes
-			};
-
-			return animation;
-
-		}
-
-		function prepareAnimationData( data, defaultMatrix ) {
-
-			var keyframes = [];
-
-			// transfer data into a sortable array
-
-			for ( var time in data ) {
-
-				keyframes.push( { time: parseFloat( time ), value: data[ time ] } );
-
-			}
-
-			// ensure keyframes are sorted by time
-
-			keyframes.sort( ascending );
-
-			// now we clean up all animation data, so we can use them for keyframe tracks
-
-			for ( var i = 0; i < 16; i ++ ) {
-
-				transformAnimationData( keyframes, i, defaultMatrix.elements[ i ] );
-
-			}
-
-			return keyframes;
-
-			// array sort function
-
-			function ascending( a, b ) {
-
-				return a.time - b.time;
-
-			}
-
-		}
-
-		var position = new THREE.Vector3();
-		var scale = new THREE.Vector3();
-		var quaternion = new THREE.Quaternion();
-
-		function createKeyframeTracks( animation, tracks ) {
-
-			var keyframes = animation.keyframes;
-			var name = animation.name;
-
-			var times = [];
-			var positionData = [];
-			var quaternionData = [];
-			var scaleData = [];
-
-			for ( var i = 0, l = keyframes.length; i < l; i ++ ) {
-
-				var keyframe = keyframes[ i ];
-
-				var time = keyframe.time;
-				var value = keyframe.value;
-
-				matrix.fromArray( value ).transpose();
-				matrix.decompose( position, quaternion, scale );
-
-				times.push( time );
-				positionData.push( position.x, position.y, position.z );
-				quaternionData.push( quaternion.x, quaternion.y, quaternion.z, quaternion.w );
-				scaleData.push( scale.x, scale.y, scale.z );
-
-			}
-
-			if ( positionData.length > 0 ) tracks.push( new THREE.VectorKeyframeTrack( name + '.position', times, positionData ) );
-			if ( quaternionData.length > 0 ) tracks.push( new THREE.QuaternionKeyframeTrack( name + '.quaternion', times, quaternionData ) );
-			if ( scaleData.length > 0 ) tracks.push( new THREE.VectorKeyframeTrack( name + '.scale', times, scaleData ) );
-
-			return tracks;
-
-		}
-
-		function transformAnimationData( keyframes, property, defaultValue ) {
-
-			var keyframe;
-
-			var empty = true;
-			var i, l;
-
-			// check, if values of a property are missing in our keyframes
-
-			for ( i = 0, l = keyframes.length; i < l; i ++ ) {
-
-				keyframe = keyframes[ i ];
-
-				if ( keyframe.value[ property ] === undefined ) {
-
-					keyframe.value[ property ] = null; // mark as missing
-
-				} else {
-
-					empty = false;
-
-				}
-
-			}
-
-			if ( empty === true ) {
-
-				// no values at all, so we set a default value
-
-				for ( i = 0, l = keyframes.length; i < l; i ++ ) {
-
-					keyframe = keyframes[ i ];
-
-					keyframe.value[ property ] = defaultValue;
-
-				}
-
-			} else {
-
-				// filling gaps
-
-				createMissingKeyframes( keyframes, property );
-
-			}
-
-		}
-
-		function createMissingKeyframes( keyframes, property ) {
-
-			var prev, next;
-
-			for ( var i = 0, l = keyframes.length; i < l; i ++ ) {
-
-				var keyframe = keyframes[ i ];
-
-				if ( keyframe.value[ property ] === null ) {
-
-					prev = getPrev( keyframes, i, property );
-					next = getNext( keyframes, i, property );
-
-					if ( prev === null ) {
-
-						keyframe.value[ property ] = next.value[ property ];
-						continue;
-
-					}
-
-					if ( next === null ) {
-
-						keyframe.value[ property ] = prev.value[ property ];
-						continue;
-
-					}
-
-					interpolate( keyframe, prev, next, property );
-
-				}
-
-			}
-
-		}
-
-		function getPrev( keyframes, i, property ) {
-
-			while ( i >= 0 ) {
-
-				var keyframe = keyframes[ i ];
-
-				if ( keyframe.value[ property ] !== null ) return keyframe;
-
-				i --;
-
-			}
-
-			return null;
-
-		}
-
-		function getNext( keyframes, i, property ) {
-
-			while ( i < keyframes.length ) {
-
-				var keyframe = keyframes[ i ];
-
-				if ( keyframe.value[ property ] !== null ) return keyframe;
-
-				i ++;
-
-			}
-
-			return null;
-
-		}
-
-		function interpolate( key, prev, next, property ) {
-
-			if ( ( next.time - prev.time ) === 0 ) {
-
-				key.value[ property ] = prev.value[ property ];
-				return;
-
-			}
-
-			key.value[ property ] = ( ( key.time - prev.time ) * ( next.value[ property ] - prev.value[ property ] ) / ( next.time - prev.time ) ) + prev.value[ property ];
-
-		}
-
-		// animation clips
-
-		function parseAnimationClip( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'id' ) || 'default',
-				start: parseFloat( xml.getAttribute( 'start' ) || 0 ),
-				end: parseFloat( xml.getAttribute( 'end' ) || 0 ),
-				animations: []
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'instance_animation':
-						data.animations.push( parseId( child.getAttribute( 'url' ) ) );
-						break;
-
-				}
-
-			}
-
-			library.clips[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function buildAnimationClip( data ) {
-
-			var tracks = [];
-
-			var name = data.name;
-			var duration = ( data.end - data.start ) || - 1;
-			var animations = data.animations;
-
-			for ( var i = 0, il = animations.length; i < il; i ++ ) {
-
-				var animationTracks = getAnimation( animations[ i ] );
-
-				for ( var j = 0, jl = animationTracks.length; j < jl; j ++ ) {
-
-					tracks.push( animationTracks[ j ] );
-
-				}
-
-			}
-
-			return new THREE.AnimationClip( name, duration, tracks );
-
-		}
-
-		function getAnimationClip( id ) {
-
-			return getBuild( library.clips[ id ], buildAnimationClip );
-
-		}
-
-		// controller
-
-		function parseController( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'skin':
-						// there is exactly one skin per controller
-						data.id = parseId( child.getAttribute( 'source' ) );
-						data.skin = parseSkin( child );
-						break;
-
-					case 'morph':
-						data.id = parseId( child.getAttribute( 'source' ) );
-						console.warn( 'THREE.ColladaLoader: Morph target animation not supported yet.' );
-						break;
-
-				}
-
-			}
-
-			library.controllers[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parseSkin( xml ) {
-
-			var data = {
-				sources: {}
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'bind_shape_matrix':
-						data.bindShapeMatrix = parseFloats( child.textContent );
-						break;
-
-					case 'source':
-						var id = child.getAttribute( 'id' );
-						data.sources[ id ] = parseSource( child );
-						break;
-
-					case 'joints':
-						data.joints = parseJoints( child );
-						break;
-
-					case 'vertex_weights':
-						data.vertexWeights = parseVertexWeights( child );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseJoints( xml ) {
-
-			var data = {
-				inputs: {}
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'input':
-						var semantic = child.getAttribute( 'semantic' );
-						var id = parseId( child.getAttribute( 'source' ) );
-						data.inputs[ semantic ] = id;
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseVertexWeights( xml ) {
-
-			var data = {
-				inputs: {}
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'input':
-						var semantic = child.getAttribute( 'semantic' );
-						var id = parseId( child.getAttribute( 'source' ) );
-						var offset = parseInt( child.getAttribute( 'offset' ) );
-						data.inputs[ semantic ] = { id: id, offset: offset };
-						break;
-
-					case 'vcount':
-						data.vcount = parseInts( child.textContent );
-						break;
-
-					case 'v':
-						data.v = parseInts( child.textContent );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function buildController( data ) {
-
-			var build = {
-				id: data.id
-			};
-
-			var geometry = library.geometries[ build.id ];
-
-			if ( data.skin !== undefined ) {
-
-				build.skin = buildSkin( data.skin );
-
-				// we enhance the 'sources' property of the corresponding geometry with our skin data
-
-				geometry.sources.skinIndices = build.skin.indices;
-				geometry.sources.skinWeights = build.skin.weights;
-
-			}
-
-			return build;
-
-		}
-
-		function buildSkin( data ) {
-
-			var BONE_LIMIT = 4;
-
-			var build = {
-				joints: [], // this must be an array to preserve the joint order
-				indices: {
-					array: [],
-					stride: BONE_LIMIT
-				},
-				weights: {
-					array: [],
-					stride: BONE_LIMIT
-				}
-			};
-
-			var sources = data.sources;
-			var vertexWeights = data.vertexWeights;
-
-			var vcount = vertexWeights.vcount;
-			var v = vertexWeights.v;
-			var jointOffset = vertexWeights.inputs.JOINT.offset;
-			var weightOffset = vertexWeights.inputs.WEIGHT.offset;
-
-			var jointSource = data.sources[ data.joints.inputs.JOINT ];
-			var inverseSource = data.sources[ data.joints.inputs.INV_BIND_MATRIX ];
-
-			var weights = sources[ vertexWeights.inputs.WEIGHT.id ].array;
-			var stride = 0;
-
-			var i, j, l;
-
-			// procces skin data for each vertex
-
-			for ( i = 0, l = vcount.length; i < l; i ++ ) {
-
-				var jointCount = vcount[ i ]; // this is the amount of joints that affect a single vertex
-				var vertexSkinData = [];
-
-				for ( j = 0; j < jointCount; j ++ ) {
-
-					var skinIndex = v[ stride + jointOffset ];
-					var weightId = v[ stride + weightOffset ];
-					var skinWeight = weights[ weightId ];
-
-					vertexSkinData.push( { index: skinIndex, weight: skinWeight } );
-
-					stride += 2;
-
-				}
-
-				// we sort the joints in descending order based on the weights.
-				// this ensures, we only procced the most important joints of the vertex
-
-				vertexSkinData.sort( descending );
-
-				// now we provide for each vertex a set of four index and weight values.
-				// the order of the skin data matches the order of vertices
-
-				for ( j = 0; j < BONE_LIMIT; j ++ ) {
-
-					var d = vertexSkinData[ j ];
-
-					if ( d !== undefined ) {
-
-						build.indices.array.push( d.index );
-						build.weights.array.push( d.weight );
-
-					} else {
-
-						build.indices.array.push( 0 );
-						build.weights.array.push( 0 );
-
-					}
-
-				}
-
-			}
-
-			// setup bind matrix
-
-			if ( data.bindShapeMatrix ) {
-
-				build.bindMatrix = new THREE.Matrix4().fromArray( data.bindShapeMatrix ).transpose();
-
-			} else {
-
-				build.bindMatrix = new THREE.Matrix4().identity();
-
-			}
-
-			// process bones and inverse bind matrix data
-
-			for ( i = 0, l = jointSource.array.length; i < l; i ++ ) {
-
-				var name = jointSource.array[ i ];
-				var boneInverse = new THREE.Matrix4().fromArray( inverseSource.array, i * inverseSource.stride ).transpose();
-
-				build.joints.push( { name: name, boneInverse: boneInverse } );
-
-			}
-
-			return build;
-
-			// array sort function
-
-			function descending( a, b ) {
-
-				return b.weight - a.weight;
-
-			}
-
-		}
-
-		function getController( id ) {
-
-			return getBuild( library.controllers[ id ], buildController );
-
-		}
-
-		// image
-
-		function parseImage( xml ) {
-
-			var data = {
-				init_from: getElementsByTagName( xml, 'init_from' )[ 0 ].textContent
-			};
-
-			library.images[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function buildImage( data ) {
-
-			if ( data.build !== undefined ) return data.build;
-
-			return data.init_from;
-
-		}
-
-		function getImage( id ) {
-
-			var data = library.images[ id ];
-
-			if ( data !== undefined ) {
-
-				return getBuild( data, buildImage );
-
-			}
-
-			console.warn( 'THREE.ColladaLoader: Couldn\'t find image with ID:', id );
-
-			return null;
-
-		}
-
-		// effect
-
-		function parseEffect( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'profile_COMMON':
-						data.profile = parseEffectProfileCOMMON( child );
-						break;
-
-				}
-
-			}
-
-			library.effects[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parseEffectProfileCOMMON( xml ) {
-
-			var data = {
-				surfaces: {},
-				samplers: {}
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'newparam':
-						parseEffectNewparam( child, data );
-						break;
-
-					case 'technique':
-						data.technique = parseEffectTechnique( child );
-						break;
-
-					case 'extra':
-						data.extra = parseEffectExtra( child );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectNewparam( xml, data ) {
-
-			var sid = xml.getAttribute( 'sid' );
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'surface':
-						data.surfaces[ sid ] = parseEffectSurface( child );
-						break;
-
-					case 'sampler2D':
-						data.samplers[ sid ] = parseEffectSampler( child );
-						break;
-
-				}
-
-			}
-
-		}
-
-		function parseEffectSurface( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'init_from':
-						data.init_from = child.textContent;
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectSampler( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'source':
-						data.source = child.textContent;
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectTechnique( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'constant':
-					case 'lambert':
-					case 'blinn':
-					case 'phong':
-						data.type = child.nodeName;
-						data.parameters = parseEffectParameters( child );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectParameters( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'emission':
-					case 'diffuse':
-					case 'specular':
-					case 'shininess':
-					case 'transparency':
-						data[ child.nodeName ] = parseEffectParameter( child );
-						break;
-					case 'transparent':
-						data[ child.nodeName ] = {
-							opaque: child.getAttribute( 'opaque' ),
-							data: parseEffectParameter( child )
-						};
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectParameter( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'color':
-						data[ child.nodeName ] = parseFloats( child.textContent );
-						break;
-
-					case 'float':
-						data[ child.nodeName ] = parseFloat( child.textContent );
-						break;
-
-					case 'texture':
-						data[ child.nodeName ] = { id: child.getAttribute( 'texture' ), extra: parseEffectParameterTexture( child ) };
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectParameterTexture( xml ) {
-
-			var data = {
-				technique: {}
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'extra':
-						parseEffectParameterTextureExtra( child, data );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectParameterTextureExtra( xml, data ) {
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'technique':
-						parseEffectParameterTextureExtraTechnique( child, data );
-						break;
-
-				}
-
-			}
-
-		}
-
-		function parseEffectParameterTextureExtraTechnique( xml, data ) {
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'repeatU':
-					case 'repeatV':
-					case 'offsetU':
-					case 'offsetV':
-						data.technique[ child.nodeName ] = parseFloat( child.textContent );
-						break;
-
-					case 'wrapU':
-					case 'wrapV':
-
-						// some files have values for wrapU/wrapV which become NaN via parseInt
-
-						if ( child.textContent.toUpperCase() === 'TRUE' ) {
-
-							data.technique[ child.nodeName ] = 1;
-
-						} else if ( child.textContent.toUpperCase() === 'FALSE' ) {
-
-							data.technique[ child.nodeName ] = 0;
-
-						} else {
-
-							data.technique[ child.nodeName ] = parseInt( child.textContent );
-
-						}
-
-						break;
-
-				}
-
-			}
-
-		}
-
-		function parseEffectExtra( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'technique':
-						data.technique = parseEffectExtraTechnique( child );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseEffectExtraTechnique( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'double_sided':
-						data[ child.nodeName ] = parseInt( child.textContent );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function buildEffect( data ) {
-
-			return data;
-
-		}
-
-		function getEffect( id ) {
-
-			return getBuild( library.effects[ id ], buildEffect );
-
-		}
-
-		// material
-
-		function parseMaterial( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' )
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'instance_effect':
-						data.url = parseId( child.getAttribute( 'url' ) );
-						break;
-
-				}
-
-			}
-
-			library.materials[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function getTextureLoader( image ) {
-
-			var loader;
-
-			var extension = image.slice( ( image.lastIndexOf( '.' ) - 1 >>> 0 ) + 2 ); // http://www.jstips.co/en/javascript/get-file-extension/
-			extension = extension.toLowerCase();
-
-			switch ( extension ) {
-
-				case 'tga':
-					loader = tgaLoader;
-					break;
-
-				default:
-					loader = textureLoader;
-
-			}
-
-			return loader;
-
-		}
-
-		function buildMaterial( data ) {
-
-			var effect = getEffect( data.url );
-			var technique = effect.profile.technique;
-			var extra = effect.profile.extra;
-
-			var material;
-
-			switch ( technique.type ) {
-
-				case 'phong':
-				case 'blinn':
-					material = new THREE.MeshPhongMaterial();
-					break;
-
-				case 'lambert':
-					material = new THREE.MeshLambertMaterial();
-					break;
-
-				default:
-					material = new THREE.MeshBasicMaterial();
-					break;
-
-			}
-
-			material.name = data.name;
-
-			function getTexture( textureObject ) {
-
-				var sampler = effect.profile.samplers[ textureObject.id ];
-				var image = null;
-
-				// get image
-
-				if ( sampler !== undefined ) {
-
-					var surface = effect.profile.surfaces[ sampler.source ];
-					image = getImage( surface.init_from );
-
-				} else {
-
-					console.warn( 'THREE.ColladaLoader: Undefined sampler. Access image directly (see #12530).' );
-					image = getImage( textureObject.id );
-
-				}
-
-				// create texture if image is avaiable
-
-				if ( image !== null ) {
-
-					var loader = getTextureLoader( image );
-
-					if ( loader !== undefined ) {
-
-						var texture = loader.load( image );
-
-						var extra = textureObject.extra;
-
-						if ( extra !== undefined && extra.technique !== undefined && isEmpty( extra.technique ) === false ) {
-
-							var technique = extra.technique;
-
-							texture.wrapS = technique.wrapU ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
-							texture.wrapT = technique.wrapV ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
-
-							texture.offset.set( technique.offsetU || 0, technique.offsetV || 0 );
-							texture.repeat.set( technique.repeatU || 1, technique.repeatV || 1 );
-
-						} else {
-
-							texture.wrapS = THREE.RepeatWrapping;
-							texture.wrapT = THREE.RepeatWrapping;
-
-						}
-
-						return texture;
-
-					} else {
-
-						console.warn( 'THREE.ColladaLoader: Loader for texture %s not found.', image );
-
-						return null;
-
-					}
-
-				} else {
-
-					console.warn( 'THREE.ColladaLoader: Couldn\'t create texture with ID:', textureObject.id );
-
-					return null;
-
-				}
-
-			}
-
-			var parameters = technique.parameters;
-
-			for ( var key in parameters ) {
-
-				var parameter = parameters[ key ];
-
-				switch ( key ) {
-
-					case 'diffuse':
-						if ( parameter.color ) material.color.fromArray( parameter.color );
-						if ( parameter.texture ) material.map = getTexture( parameter.texture );
-						break;
-					case 'specular':
-						if ( parameter.color && material.specular ) material.specular.fromArray( parameter.color );
-						if ( parameter.texture ) material.specularMap = getTexture( parameter.texture );
-						break;
-					case 'shininess':
-						if ( parameter.float && material.shininess ) material.shininess = parameter.float;
-						break;
-					case 'emission':
-						if ( parameter.color && material.emissive ) material.emissive.fromArray( parameter.color );
-						if ( parameter.texture ) material.emissiveMap = getTexture( parameter.texture );
-						break;
-
-				}
-
-			}
-
-			//
-
-			var transparent = parameters[ 'transparent' ];
-			var transparency = parameters[ 'transparency' ];
-
-			// <transparency> does not exist but <transparent>
-
-			if ( transparency === undefined && transparent ) {
-
-				transparency = {
-					float: 1
-				};
-
-			}
-
-			// <transparent> does not exist but <transparency>
-
-			if ( transparent === undefined && transparency ) {
-
-				transparent = {
-					opaque: 'A_ONE',
-					data: {
-						color: [ 1, 1, 1, 1 ]
-					} };
-
-			}
-
-			if ( transparent && transparency ) {
-
-				// handle case if a texture exists but no color
-
-				if ( transparent.data.texture ) {
-
-					// we do not set an alpha map (see #13792)
-
-					material.transparent = true;
-
-				} else {
-
-					var color = transparent.data.color;
-
-					switch ( transparent.opaque ) {
-
-						case 'A_ONE':
-							material.opacity = color[ 3 ] * transparency.float;
-							break;
-						case 'RGB_ZERO':
-							material.opacity = 1 - ( color[ 0 ] * transparency.float );
-							break;
-						case 'A_ZERO':
-							material.opacity = 1 - ( color[ 3 ] * transparency.float );
-							break;
-						case 'RGB_ONE':
-							material.opacity = color[ 0 ] * transparency.float;
-							break;
-						default:
-							console.warn( 'THREE.ColladaLoader: Invalid opaque type "%s" of transparent tag.', transparent.opaque );
-
-					}
-
-					if ( material.opacity < 1 ) material.transparent = true;
-
-				}
-
-			}
-
-			//
-
-			if ( extra !== undefined && extra.technique !== undefined && extra.technique.double_sided === 1 ) {
-
-				material.side = THREE.DoubleSide;
-
-			}
-
-			return material;
-
-		}
-
-		function getMaterial( id ) {
-
-			return getBuild( library.materials[ id ], buildMaterial );
-
-		}
-
-		// camera
-
-		function parseCamera( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' )
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'optics':
-						data.optics = parseCameraOptics( child );
-						break;
-
-				}
-
-			}
-
-			library.cameras[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parseCameraOptics( xml ) {
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				switch ( child.nodeName ) {
-
-					case 'technique_common':
-						return parseCameraTechnique( child );
-
-				}
-
-			}
-
-			return {};
-
-		}
-
-		function parseCameraTechnique( xml ) {
-
-			var data = {};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				switch ( child.nodeName ) {
-
-					case 'perspective':
-					case 'orthographic':
-
-						data.technique = child.nodeName;
-						data.parameters = parseCameraParameters( child );
-
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseCameraParameters( xml ) {
-
-			var data = {};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				switch ( child.nodeName ) {
-
-					case 'xfov':
-					case 'yfov':
-					case 'xmag':
-					case 'ymag':
-					case 'znear':
-					case 'zfar':
-					case 'aspect_ratio':
-						data[ child.nodeName ] = parseFloat( child.textContent );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function buildCamera( data ) {
-
-			var camera;
-
-			switch ( data.optics.technique ) {
-
-				case 'perspective':
-					camera = new THREE.PerspectiveCamera(
-						data.optics.parameters.yfov,
-						data.optics.parameters.aspect_ratio,
-						data.optics.parameters.znear,
-						data.optics.parameters.zfar
-					);
-					break;
-
-				case 'orthographic':
-					var ymag = data.optics.parameters.ymag;
-					var xmag = data.optics.parameters.xmag;
-					var aspectRatio = data.optics.parameters.aspect_ratio;
-
-					xmag = ( xmag === undefined ) ? ( ymag * aspectRatio ) : xmag;
-					ymag = ( ymag === undefined ) ? ( xmag / aspectRatio ) : ymag;
-
-					xmag *= 0.5;
-					ymag *= 0.5;
-
-					camera = new THREE.OrthographicCamera(
-						- xmag, xmag, ymag, - ymag, // left, right, top, bottom
-						data.optics.parameters.znear,
-						data.optics.parameters.zfar
-					);
-					break;
-
-				default:
-					camera = new THREE.PerspectiveCamera();
-					break;
-
-			}
-
-			camera.name = data.name;
-
-			return camera;
-
-		}
-
-		function getCamera( id ) {
-
-			var data = library.cameras[ id ];
-
-			if ( data !== undefined ) {
-
-				return getBuild( data, buildCamera );
-
-			}
-
-			console.warn( 'THREE.ColladaLoader: Couldn\'t find camera with ID:', id );
-
-			return null;
-
-		}
-
-		// light
-
-		function parseLight( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'technique_common':
-						data = parseLightTechnique( child );
-						break;
-
-				}
-
-			}
-
-			library.lights[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parseLightTechnique( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'directional':
-					case 'point':
-					case 'spot':
-					case 'ambient':
-
-						data.technique = child.nodeName;
-						data.parameters = parseLightParameters( child );
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseLightParameters( xml ) {
-
-			var data = {};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'color':
-						var array = parseFloats( child.textContent );
-						data.color = new THREE.Color().fromArray( array );
-						break;
-
-					case 'falloff_angle':
-						data.falloffAngle = parseFloat( child.textContent );
-						break;
-
-					case 'quadratic_attenuation':
-						var f = parseFloat( child.textContent );
-						data.distance = f ? Math.sqrt( 1 / f ) : 0;
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function buildLight( data ) {
-
-			var light;
-
-			switch ( data.technique ) {
-
-				case 'directional':
-					light = new THREE.DirectionalLight();
-					break;
-
-				case 'point':
-					light = new THREE.PointLight();
-					break;
-
-				case 'spot':
-					light = new THREE.SpotLight();
-					break;
-
-				case 'ambient':
-					light = new THREE.AmbientLight();
-					break;
-
-			}
-
-			if ( data.parameters.color ) light.color.copy( data.parameters.color );
-			if ( data.parameters.distance ) light.distance = data.parameters.distance;
-
-			return light;
-
-		}
-
-		function getLight( id ) {
-
-			var data = library.lights[ id ];
-
-			if ( data !== undefined ) {
-
-				return getBuild( data, buildLight );
-
-			}
-
-			console.warn( 'THREE.ColladaLoader: Couldn\'t find light with ID:', id );
-
-			return null;
-
-		}
-
-		// geometry
-
-		function parseGeometry( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' ),
-				sources: {},
-				vertices: {},
-				primitives: []
-			};
-
-			var mesh = getElementsByTagName( xml, 'mesh' )[ 0 ];
-
-			// the following tags inside geometry are not supported yet (see https://github.com/mrdoob/three.js/pull/12606): convex_mesh, spline, brep
-			if ( mesh === undefined ) return;
-
-			for ( var i = 0; i < mesh.childNodes.length; i ++ ) {
-
-				var child = mesh.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				var id = child.getAttribute( 'id' );
-
-				switch ( child.nodeName ) {
-
-					case 'source':
-						data.sources[ id ] = parseSource( child );
-						break;
-
-					case 'vertices':
-						// data.sources[ id ] = data.sources[ parseId( getElementsByTagName( child, 'input' )[ 0 ].getAttribute( 'source' ) ) ];
-						data.vertices = parseGeometryVertices( child );
-						break;
-
-					case 'polygons':
-						console.warn( 'THREE.ColladaLoader: Unsupported primitive type: ', child.nodeName );
-						break;
-
-					case 'lines':
-					case 'linestrips':
-					case 'polylist':
-					case 'triangles':
-						data.primitives.push( parseGeometryPrimitive( child ) );
-						break;
-
-					default:
-						console.log( child );
-
-				}
-
-			}
-
-			library.geometries[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parseSource( xml ) {
-
-			var data = {
-				array: [],
-				stride: 3
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'float_array':
-						data.array = parseFloats( child.textContent );
-						break;
-
-					case 'Name_array':
-						data.array = parseStrings( child.textContent );
-						break;
-
-					case 'technique_common':
-						var accessor = getElementsByTagName( child, 'accessor' )[ 0 ];
-
-						if ( accessor !== undefined ) {
-
-							data.stride = parseInt( accessor.getAttribute( 'stride' ) );
-
-						}
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseGeometryVertices( xml ) {
-
-			var data = {};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				data[ child.getAttribute( 'semantic' ) ] = parseId( child.getAttribute( 'source' ) );
-
-			}
-
-			return data;
-
-		}
-
-		function parseGeometryPrimitive( xml ) {
-
-			var primitive = {
-				type: xml.nodeName,
-				material: xml.getAttribute( 'material' ),
-				count: parseInt( xml.getAttribute( 'count' ) ),
-				inputs: {},
-				stride: 0,
-				hasUV: false
-			};
-
-			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'input':
-						var id = parseId( child.getAttribute( 'source' ) );
-						var semantic = child.getAttribute( 'semantic' );
-						var offset = parseInt( child.getAttribute( 'offset' ) );
-						primitive.inputs[ semantic ] = { id: id, offset: offset };
-						primitive.stride = Math.max( primitive.stride, offset + 1 );
-						if ( semantic === 'TEXCOORD' ) primitive.hasUV = true;
-						break;
-
-					case 'vcount':
-						primitive.vcount = parseInts( child.textContent );
-						break;
-
-					case 'p':
-						primitive.p = parseInts( child.textContent );
-						break;
-
-				}
-
-			}
-
-			return primitive;
-
-		}
-
-		function groupPrimitives( primitives ) {
-
-			var build = {};
-
-			for ( var i = 0; i < primitives.length; i ++ ) {
-
-				var primitive = primitives[ i ];
-
-				if ( build[ primitive.type ] === undefined ) build[ primitive.type ] = [];
-
-				build[ primitive.type ].push( primitive );
-
-			}
-
-			return build;
-
-		}
-
-		function checkUVCoordinates( primitives ) {
-
-			var count = 0;
-
-			for ( var i = 0, l = primitives.length; i < l; i ++ ) {
-
-				var primitive = primitives[ i ];
-
-				if ( primitive.hasUV === true ) {
-
-					count ++;
-
-				}
-
-			}
-
-			if ( count > 0 && count < primitives.length ) {
-
-				primitives.uvsNeedsFix = true;
-
-			}
-
-		}
-
-		function buildGeometry( data ) {
-
-			var build = {};
-
-			var sources = data.sources;
-			var vertices = data.vertices;
-			var primitives = data.primitives;
-
-			if ( primitives.length === 0 ) return {};
-
-			// our goal is to create one buffer geometry for a single type of primitives
-			// first, we group all primitives by their type
-
-			var groupedPrimitives = groupPrimitives( primitives );
-
-			for ( var type in groupedPrimitives ) {
-
-				var primitiveType = groupedPrimitives[ type ];
-
-				// second, ensure consistent uv coordinates for each type of primitives (polylist,triangles or lines)
-
-				checkUVCoordinates( primitiveType );
-
-				// third, create a buffer geometry for each type of primitives
-
-				build[ type ] = buildGeometryType( primitiveType, sources, vertices );
-
-			}
-
-			return build;
-
-		}
-
-		function buildGeometryType( primitives, sources, vertices ) {
-
-			var build = {};
-
-			var position = { array: [], stride: 0 };
-			var normal = { array: [], stride: 0 };
-			var uv = { array: [], stride: 0 };
-			var color = { array: [], stride: 0 };
-
-			var skinIndex = { array: [], stride: 4 };
-			var skinWeight = { array: [], stride: 4 };
-
-			var geometry = new THREE.BufferGeometry();
-
-			var materialKeys = [];
-
-			var start = 0;
-
-			for ( var p = 0; p < primitives.length; p ++ ) {
-
-				var primitive = primitives[ p ];
-				var inputs = primitive.inputs;
-
-				// groups
-
-				var count = 0;
-
-				switch ( primitive.type ) {
-
-					case 'lines':
-					case 'linestrips':
-						count = primitive.count * 2;
-						break;
-
-					case 'triangles':
-						count = primitive.count * 3;
-						break;
-
-					case 'polylist':
-
-						for ( var g = 0; g < primitive.count; g ++ ) {
-
-							var vc = primitive.vcount[ g ];
-
-							switch ( vc ) {
-
-								case 3:
-									count += 3; // single triangle
-									break;
-
-								case 4:
-									count += 6; // quad, subdivided into two triangles
-									break;
-
-								default:
-									count += ( vc - 2 ) * 3; // polylist with more than four vertices
-									break;
-
-							}
-
-						}
-
-						break;
-
-					default:
-						console.warn( 'THREE.ColladaLoader: Unknow primitive type:', primitive.type );
-
-				}
-
-				geometry.addGroup( start, count, p );
-				start += count;
-
-				// material
-
-				if ( primitive.material ) {
-
-					materialKeys.push( primitive.material );
-
-				}
-
-				// geometry data
-
-				for ( var name in inputs ) {
-
-					var input = inputs[ name ];
-
-					switch ( name )	{
-
-						case 'VERTEX':
-							for ( var key in vertices ) {
-
-								var id = vertices[ key ];
-
-								switch ( key ) {
-
-									case 'POSITION':
-										var prevLength = position.array.length;
-										buildGeometryData( primitive, sources[ id ], input.offset, position.array );
-										position.stride = sources[ id ].stride;
-
-										if ( sources.skinWeights && sources.skinIndices ) {
-
-											buildGeometryData( primitive, sources.skinIndices, input.offset, skinIndex.array );
-											buildGeometryData( primitive, sources.skinWeights, input.offset, skinWeight.array );
-
-										}
-
-										// see #3803
-
-										if ( primitive.hasUV === false && primitives.uvsNeedsFix === true ) {
-
-											var count = ( position.array.length - prevLength ) / position.stride;
-
-											for ( var i = 0; i < count; i ++ ) {
-
-												// fill missing uv coordinates
-
-												uv.array.push( 0, 0 );
-
-											}
-
-										}
-										break;
-
-									case 'NORMAL':
-										buildGeometryData( primitive, sources[ id ], input.offset, normal.array );
-										normal.stride = sources[ id ].stride;
-										break;
-
-									case 'COLOR':
-										buildGeometryData( primitive, sources[ id ], input.offset, color.array );
-										color.stride = sources[ id ].stride;
-										break;
-
-									case 'TEXCOORD':
-										buildGeometryData( primitive, sources[ id ], input.offset, uv.array );
-										uv.stride = sources[ id ].stride;
-										break;
-
-									default:
-										console.warn( 'THREE.ColladaLoader: Semantic "%s" not handled in geometry build process.', key );
-
-								}
-
-							}
-							break;
-
-						case 'NORMAL':
-							buildGeometryData( primitive, sources[ input.id ], input.offset, normal.array );
-							normal.stride = sources[ input.id ].stride;
-							break;
-
-						case 'COLOR':
-							buildGeometryData( primitive, sources[ input.id ], input.offset, color.array );
-							color.stride = sources[ input.id ].stride;
-							break;
-
-						case 'TEXCOORD':
-							buildGeometryData( primitive, sources[ input.id ], input.offset, uv.array );
-							uv.stride = sources[ input.id ].stride;
-							break;
-
-					}
-
-				}
-
-			}
-
-			// build geometry
-
-			if ( position.array.length > 0 ) geometry.addAttribute( 'position', new THREE.Float32BufferAttribute( position.array, position.stride ) );
-			if ( normal.array.length > 0 ) geometry.addAttribute( 'normal', new THREE.Float32BufferAttribute( normal.array, normal.stride ) );
-			if ( color.array.length > 0 ) geometry.addAttribute( 'color', new THREE.Float32BufferAttribute( color.array, color.stride ) );
-			if ( uv.array.length > 0 ) geometry.addAttribute( 'uv', new THREE.Float32BufferAttribute( uv.array, uv.stride ) );
-
-			if ( skinIndex.array.length > 0 ) geometry.addAttribute( 'skinIndex', new THREE.Float32BufferAttribute( skinIndex.array, skinIndex.stride ) );
-			if ( skinWeight.array.length > 0 ) geometry.addAttribute( 'skinWeight', new THREE.Float32BufferAttribute( skinWeight.array, skinWeight.stride ) );
-
-			build.data = geometry;
-			build.type = primitives[ 0 ].type;
-			build.materialKeys = materialKeys;
-
-			return build;
-
-		}
-
-		function buildGeometryData( primitive, source, offset, array ) {
-
-			var indices = primitive.p;
-			var stride = primitive.stride;
-			var vcount = primitive.vcount;
-
-			function pushVector( i ) {
-
-				var index = indices[ i + offset ] * sourceStride;
-				var length = index + sourceStride;
-
-				for ( ; index < length; index ++ ) {
-
-					array.push( sourceArray[ index ] );
-
-				}
-
-			}
-
-			var sourceArray = source.array;
-			var sourceStride = source.stride;
-
-			if ( primitive.vcount !== undefined ) {
-
-				var index = 0;
-
-				for ( var i = 0, l = vcount.length; i < l; i ++ ) {
-
-					var count = vcount[ i ];
-
-					if ( count === 4 ) {
-
-						var a = index + stride * 0;
-						var b = index + stride * 1;
-						var c = index + stride * 2;
-						var d = index + stride * 3;
-
-						pushVector( a ); pushVector( b ); pushVector( d );
-						pushVector( b ); pushVector( c ); pushVector( d );
-
-					} else if ( count === 3 ) {
-
-						var a = index + stride * 0;
-						var b = index + stride * 1;
-						var c = index + stride * 2;
-
-						pushVector( a ); pushVector( b ); pushVector( c );
-
-					} else if ( count > 4 ) {
-
-						for ( var k = 1, kl = ( count - 2 ); k <= kl; k ++ ) {
-
-							var a = index + stride * 0;
-							var b = index + stride * k;
-							var c = index + stride * ( k + 1 );
-
-							pushVector( a ); pushVector( b ); pushVector( c );
-
-						}
-
-					}
-
-					index += stride * count;
-
-				}
-
-			} else {
-
-				for ( var i = 0, l = indices.length; i < l; i += stride ) {
-
-					pushVector( i );
-
-				}
-
-			}
-
-		}
-
-		function getGeometry( id ) {
-
-			return getBuild( library.geometries[ id ], buildGeometry );
-
-		}
-
-		// kinematics
-
-		function parseKinematicsModel( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' ) || '',
-				joints: {},
-				links: []
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'technique_common':
-						parseKinematicsTechniqueCommon( child, data );
-						break;
-
-				}
-
-			}
-
-			library.kinematicsModels[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function buildKinematicsModel( data ) {
-
-			if ( data.build !== undefined ) return data.build;
-
-			return data;
-
-		}
-
-		function getKinematicsModel( id ) {
-
-			return getBuild( library.kinematicsModels[ id ], buildKinematicsModel );
-
-		}
-
-		function parseKinematicsTechniqueCommon( xml, data ) {
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'joint':
-						data.joints[ child.getAttribute( 'sid' ) ] = parseKinematicsJoint( child );
-						break;
-
-					case 'link':
-						data.links.push( parseKinematicsLink( child ) );
-						break;
-
-				}
-
-			}
-
-		}
-
-		function parseKinematicsJoint( xml ) {
-
-			var data;
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'prismatic':
-					case 'revolute':
-						data = parseKinematicsJointParameter( child );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseKinematicsJointParameter( xml, data ) {
-
-			var data = {
-				sid: xml.getAttribute( 'sid' ),
-				name: xml.getAttribute( 'name' ) || '',
-				axis: new THREE.Vector3(),
-				limits: {
-					min: 0,
-					max: 0
-				},
-				type: xml.nodeName,
-				static: false,
-				zeroPosition: 0,
-				middlePosition: 0
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'axis':
-						var array = parseFloats( child.textContent );
-						data.axis.fromArray( array );
-						break;
-					case 'limits':
-						var max = child.getElementsByTagName( 'max' )[ 0 ];
-						var min = child.getElementsByTagName( 'min' )[ 0 ];
-
-						data.limits.max = parseFloat( max.textContent );
-						data.limits.min = parseFloat( min.textContent );
-						break;
-
-				}
-
-			}
-
-			// if min is equal to or greater than max, consider the joint static
-
-			if ( data.limits.min >= data.limits.max ) {
-
-				data.static = true;
-
-			}
-
-			// calculate middle position
-
-			data.middlePosition = ( data.limits.min + data.limits.max ) / 2.0;
-
-			return data;
-
-		}
-
-		function parseKinematicsLink( xml ) {
-
-			var data = {
-				sid: xml.getAttribute( 'sid' ),
-				name: xml.getAttribute( 'name' ) || '',
-				attachments: [],
-				transforms: []
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'attachment_full':
-						data.attachments.push( parseKinematicsAttachment( child ) );
-						break;
-
-					case 'matrix':
-					case 'translate':
-					case 'rotate':
-						data.transforms.push( parseKinematicsTransform( child ) );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseKinematicsAttachment( xml ) {
-
-			var data = {
-				joint: xml.getAttribute( 'joint' ).split( '/' ).pop(),
-				transforms: [],
-				links: []
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'link':
-						data.links.push( parseKinematicsLink( child ) );
-						break;
-
-					case 'matrix':
-					case 'translate':
-					case 'rotate':
-						data.transforms.push( parseKinematicsTransform( child ) );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function parseKinematicsTransform( xml ) {
-
-			var data = {
-				type: xml.nodeName
-			};
-
-			var array = parseFloats( xml.textContent );
-
-			switch ( data.type ) {
-
-				case 'matrix':
-					data.obj = new THREE.Matrix4();
-					data.obj.fromArray( array ).transpose();
-					break;
-
-				case 'translate':
-					data.obj = new THREE.Vector3();
-					data.obj.fromArray( array );
-					break;
-
-				case 'rotate':
-					data.obj = new THREE.Vector3();
-					data.obj.fromArray( array );
-					data.angle = THREE.Math.degToRad( array[ 3 ] );
-					break;
-
-			}
-
-			return data;
-
-		}
-
-		// physics
-
-		function parsePhysicsModel( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' ) || '',
-				rigidBodies: {}
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'rigid_body':
-						data.rigidBodies[ child.getAttribute( 'name' ) ] = {};
-						parsePhysicsRigidBody( child, data.rigidBodies[ child.getAttribute( 'name' ) ] );
-						break;
-
-				}
-
-			}
-
-			library.physicsModels[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function parsePhysicsRigidBody( xml, data ) {
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'technique_common':
-						parsePhysicsTechniqueCommon( child, data );
-						break;
-
-				}
-
-			}
-
-		}
-
-		function parsePhysicsTechniqueCommon( xml, data ) {
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'inertia':
-						data.inertia = parseFloats( child.textContent );
-						break;
-
-					case 'mass':
-						data.mass = parseFloats( child.textContent )[0];
-						break;
-
-				}
-
-			}
-
-		}
-
-		// scene
-
-		function parseKinematicsScene( xml ) {
-
-			var data = {
-				bindJointAxis: []
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'bind_joint_axis':
-						data.bindJointAxis.push( parseKinematicsBindJointAxis( child ) );
-						break;
-
-				}
-
-			}
-
-			library.kinematicsScenes[ parseId( xml.getAttribute( 'url' ) ) ] = data;
-
-		}
-
-		function parseKinematicsBindJointAxis( xml ) {
-
-			var data = {
-				target: xml.getAttribute( 'target' ).split( '/' ).pop()
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'axis':
-						var param = child.getElementsByTagName( 'param' )[ 0 ];
-						data.axis = param.textContent;
-						var tmpJointIndex = data.axis.split( 'inst_' ).pop().split( 'axis' )[ 0 ];
-						data.jointIndex = tmpJointIndex.substr( 0, tmpJointIndex.length - 1 );
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function buildKinematicsScene( data ) {
-
-			if ( data.build !== undefined ) return data.build;
-
-			return data;
-
-		}
-
-		function getKinematicsScene( id ) {
-
-			return getBuild( library.kinematicsScenes[ id ], buildKinematicsScene );
-
-		}
-
-		function setupKinematics() {
-
-			var kinematicsModelId = Object.keys( library.kinematicsModels )[ 0 ];
-			var kinematicsSceneId = Object.keys( library.kinematicsScenes )[ 0 ];
-			var visualSceneId = Object.keys( library.visualScenes )[ 0 ];
-
-			if ( kinematicsModelId === undefined || kinematicsSceneId === undefined ) return;
-
-			var kinematicsModel = getKinematicsModel( kinematicsModelId );
-			var kinematicsScene = getKinematicsScene( kinematicsSceneId );
-			var visualScene = getVisualScene( visualSceneId );
-
-			var bindJointAxis = kinematicsScene.bindJointAxis;
-			var jointMap = {};
-
-			for ( var i = 0, l = bindJointAxis.length; i < l; i ++ ) {
-
-				var axis = bindJointAxis[ i ];
-
-				// the result of the following query is an element of type 'translate', 'rotate','scale' or 'matrix'
-
-				var targetElement = collada.querySelector( '[sid="' + axis.target + '"]' );
-
-				if ( targetElement ) {
-
-					// get the parent of the transfrom element
-
-					var parentVisualElement = targetElement.parentElement;
-
-					// connect the joint of the kinematics model with the element in the visual scene
-
-					connect( axis.jointIndex, parentVisualElement );
-
-				}
-
-			}
-
-			function connect( jointIndex, visualElement ) {
-
-				var visualElementName = visualElement.getAttribute( 'name' );
-				var joint = kinematicsModel.joints[ jointIndex ];
-
-				visualScene.traverse( function ( object ) {
-
-					if ( object.name === visualElementName ) {
-
-						jointMap[ jointIndex ] = {
-							object: object,
-							transforms: buildTransformList( visualElement ),
-							joint: joint,
-							position: joint.zeroPosition
-						};
-
-					}
-
-				} );
-
-			}
-
-			var m0 = new THREE.Matrix4();
-
-			kinematics = {
-
-				joints: kinematicsModel && kinematicsModel.joints,
-
-				getJointValue: function ( jointIndex ) {
-
-					var jointData = jointMap[ jointIndex ];
-
-					if ( jointData ) {
-
-						return jointData.position;
-
-					} else {
-
-						console.warn( 'THREE.ColladaLoader: Joint ' + jointIndex + ' doesn\'t exist.' );
-
-					}
-
-				},
-
-				setJointValue: function ( jointIndex, value ) {
-
-					var jointData = jointMap[ jointIndex ];
-
-					if ( jointData ) {
-
-						var joint = jointData.joint;
-
-						if ( value > joint.limits.max || value < joint.limits.min ) {
-
-							console.warn( 'THREE.ColladaLoader: Joint ' + jointIndex + ' value ' + value + ' outside of limits (min: ' + joint.limits.min + ', max: ' + joint.limits.max + ').' );
-
-						} else if ( joint.static ) {
-
-							console.warn( 'THREE.ColladaLoader: Joint ' + jointIndex + ' is static.' );
-
-						} else {
-
-							var object = jointData.object;
-							var axis = joint.axis;
-							var transforms = jointData.transforms;
-
-							matrix.identity();
-
-							// each update, we have to apply all transforms in the correct order
-
-							for ( var i = 0; i < transforms.length; i ++ ) {
-
-								var transform = transforms[ i ];
-
-								// if there is a connection of the transform node with a joint, apply the joint value
-
-								if ( transform.sid && transform.sid.indexOf( jointIndex ) !== - 1 ) {
-
-									switch ( joint.type ) {
-
-										case 'revolute':
-											matrix.multiply( m0.makeRotationAxis( axis, THREE.Math.degToRad( value ) ) );
-											break;
-
-										case 'prismatic':
-											matrix.multiply( m0.makeTranslation( axis.x * value, axis.y * value, axis.z * value ) );
-											break;
-
-										default:
-											console.warn( 'THREE.ColladaLoader: Unknown joint type: ' + joint.type );
-											break;
-
-									}
-
-								} else {
-
-									switch ( transform.type ) {
-
-										case 'matrix':
-											matrix.multiply( transform.obj );
-											break;
-
-										case 'translate':
-											matrix.multiply( m0.makeTranslation( transform.obj.x, transform.obj.y, transform.obj.z ) );
-											break;
-
-										case 'scale':
-											matrix.scale( transform.obj );
-											break;
-
-										case 'rotate':
-											matrix.multiply( m0.makeRotationAxis( transform.obj, transform.angle ) );
-											break;
-
-									}
-
-								}
-
-							}
-
-							object.matrix.copy( matrix );
-							object.matrix.decompose( object.position, object.quaternion, object.scale );
-
-							jointMap[ jointIndex ].position = value;
-
-						}
-
-					} else {
-
-						console.log( 'THREE.ColladaLoader: ' + jointIndex + ' does not exist.' );
-
-					}
-
-				}
-
-			};
-
-		}
-
-		function buildTransformList( node ) {
-
-			var transforms = [];
-
-			var xml = collada.querySelector( '[id="' + node.id + '"]' );
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'matrix':
-						var array = parseFloats( child.textContent );
-						var matrix = new THREE.Matrix4().fromArray( array ).transpose();
-						transforms.push( {
-							sid: child.getAttribute( 'sid' ),
-							type: child.nodeName,
-							obj: matrix
-						} );
-						break;
-
-					case 'translate':
-					case 'scale':
-						var array = parseFloats( child.textContent );
-						var vector = new THREE.Vector3().fromArray( array );
-						transforms.push( {
-							sid: child.getAttribute( 'sid' ),
-							type: child.nodeName,
-							obj: vector
-						} );
-						break;
-
-					case 'rotate':
-						var array = parseFloats( child.textContent );
-						var vector = new THREE.Vector3().fromArray( array );
-						var angle = THREE.Math.degToRad( array[ 3 ] );
-						transforms.push( {
-							sid: child.getAttribute( 'sid' ),
-							type: child.nodeName,
-							obj: vector,
-							angle: angle
-						} );
-						break;
-
-				}
-
-			}
-
-			return transforms;
-
-		}
-
-		// nodes
-
-		function prepareNodes( xml ) {
-
-			var elements = xml.getElementsByTagName( 'node' );
-
-			// ensure all node elements have id attributes
-
-			for ( var i = 0; i < elements.length; i ++ ) {
-
-				var element = elements[ i ];
-
-				if ( element.hasAttribute( 'id' ) === false ) {
-
-					element.setAttribute( 'id', generateId() );
-
-				}
-
-			}
-
-		}
-
-		var matrix = new THREE.Matrix4();
-		var vector = new THREE.Vector3();
-
-		function parseNode( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' ) || '',
-				type: xml.getAttribute( 'type' ),
-				id: xml.getAttribute( 'id' ),
-				sid: xml.getAttribute( 'sid' ),
-				matrix: new THREE.Matrix4(),
-				nodes: [],
-				instanceCameras: [],
-				instanceControllers: [],
-				instanceLights: [],
-				instanceGeometries: [],
-				instanceNodes: [],
-				transforms: {}
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				if ( child.nodeType !== 1 ) continue;
-
-				switch ( child.nodeName ) {
-
-					case 'node':
-						data.nodes.push( child.getAttribute( 'id' ) );
-						parseNode( child );
-						break;
-
-					case 'instance_camera':
-						data.instanceCameras.push( parseId( child.getAttribute( 'url' ) ) );
-						break;
-
-					case 'instance_controller':
-						data.instanceControllers.push( parseNodeInstance( child ) );
-						break;
-
-					case 'instance_light':
-						data.instanceLights.push( parseId( child.getAttribute( 'url' ) ) );
-						break;
-
-					case 'instance_geometry':
-						data.instanceGeometries.push( parseNodeInstance( child ) );
-						break;
-
-					case 'instance_node':
-						data.instanceNodes.push( parseId( child.getAttribute( 'url' ) ) );
-						break;
-
-					case 'matrix':
-						var array = parseFloats( child.textContent );
-						data.matrix.multiply( matrix.fromArray( array ).transpose() );
-						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
-						break;
-
-					case 'translate':
-						var array = parseFloats( child.textContent );
-						vector.fromArray( array );
-						data.matrix.multiply( matrix.makeTranslation( vector.x, vector.y, vector.z ) );
-						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
-						break;
-
-					case 'rotate':
-						var array = parseFloats( child.textContent );
-						var angle = THREE.Math.degToRad( array[ 3 ] );
-						data.matrix.multiply( matrix.makeRotationAxis( vector.fromArray( array ), angle ) );
-						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
-						break;
-
-					case 'scale':
-						var array = parseFloats( child.textContent );
-						data.matrix.scale( vector.fromArray( array ) );
-						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
-						break;
-
-					case 'extra':
-						break;
-
-					default:
-						console.log( child );
-
-				}
-
-			}
-
-			if ( hasNode( data.id ) ) {
-
-				console.warn( 'THREE.ColladaLoader: There is already a node with ID %s. Exclude current node from further processing.', data.id );
-
-			} else {
-
-				library.nodes[ data.id ] = data;
-
-			}
-
-			return data;
-
-		}
-
-		function parseNodeInstance( xml ) {
-
-			var data = {
-				id: parseId( xml.getAttribute( 'url' ) ),
-				materials: {},
-				skeletons: []
-			};
-
-			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
-
-				var child = xml.childNodes[ i ];
-
-				switch ( child.nodeName ) {
-
-					case 'bind_material':
-						var instances = child.getElementsByTagName( 'instance_material' );
-
-						for ( var j = 0; j < instances.length; j ++ ) {
-
-							var instance = instances[ j ];
-							var symbol = instance.getAttribute( 'symbol' );
-							var target = instance.getAttribute( 'target' );
-
-							data.materials[ symbol ] = parseId( target );
-
-						}
-
-						break;
-
-					case 'skeleton':
-						data.skeletons.push( parseId( child.textContent ) );
-						break;
-
-					default:
-						break;
-
-				}
-
-			}
-
-			return data;
-
-		}
-
-		function buildSkeleton( skeletons, joints ) {
-
-			var boneData = [];
-			var sortedBoneData = [];
-
-			var i, j, data;
-
-			// a skeleton can have multiple root bones. collada expresses this
-			// situtation with multiple "skeleton" tags per controller instance
-
-			for ( i = 0; i < skeletons.length; i ++ ) {
-
-				var skeleton = skeletons[ i ];
-
-				var root;
-
-				if ( hasNode( skeleton ) ) {
-
-					root = getNode( skeleton );
-					buildBoneHierarchy( root, joints, boneData );
-
-				} else if ( hasVisualScene( skeleton ) ) {
-
-					// handle case where the skeleton refers to the visual scene (#13335)
-
-					var visualScene = library.visualScenes[ skeleton ];
-					var children = visualScene.children;
-
-					for ( var j = 0; j < children.length; j ++ ) {
-
-						var child = children[ j ];
-
-						if ( child.type === 'JOINT' ) {
-
-							var root = getNode( child.id );
-							buildBoneHierarchy( root, joints, boneData );
-
-						}
-
-					}
-
-				} else {
-
-					console.error( 'THREE.ColladaLoader: Unable to find root bone of skeleton with ID:', skeleton );
-
-				}
-
-			}
-
-			// sort bone data (the order is defined in the corresponding controller)
-
-			for ( i = 0; i < joints.length; i ++ ) {
-
-				for ( j = 0; j < boneData.length; j ++ ) {
-
-					data = boneData[ j ];
-
-					if ( data.bone.name === joints[ i ].name ) {
-
-						sortedBoneData[ i ] = data;
-						data.processed = true;
-						break;
-
-					}
-
-				}
-
-			}
-
-			// add unprocessed bone data at the end of the list
-
-			for ( i = 0; i < boneData.length; i ++ ) {
-
-				data = boneData[ i ];
-
-				if ( data.processed === false ) {
-
-					sortedBoneData.push( data );
-					data.processed = true;
-
-				}
-
-			}
-
-			// setup arrays for skeleton creation
-
-			var bones = [];
-			var boneInverses = [];
-
-			for ( i = 0; i < sortedBoneData.length; i ++ ) {
-
-				data = sortedBoneData[ i ];
-
-				bones.push( data.bone );
-				boneInverses.push( data.boneInverse );
-
-			}
-
-			return new THREE.Skeleton( bones, boneInverses );
-
-		}
-
-		function buildBoneHierarchy( root, joints, boneData ) {
-
-			// setup bone data from visual scene
-
-			root.traverse( function ( object ) {
-
-				if ( object.isBone === true ) {
-
-					var boneInverse;
-
-					// retrieve the boneInverse from the controller data
-
-					for ( var i = 0; i < joints.length; i ++ ) {
-
-						var joint = joints[ i ];
-
-						if ( joint.name === object.name ) {
-
-							boneInverse = joint.boneInverse;
-							break;
-
-						}
-
-					}
-
-					if ( boneInverse === undefined ) {
-
-						// Unfortunately, there can be joints in the visual scene that are not part of the
-						// corresponding controller. In this case, we have to create a dummy boneInverse matrix
-						// for the respective bone. This bone won't affect any vertices, because there are no skin indices
-						// and weights defined for it. But we still have to add the bone to the sorted bone list in order to
-						// ensure a correct animation of the model.
-
-						boneInverse = new THREE.Matrix4();
-
-					}
-
-					boneData.push( { bone: object, boneInverse: boneInverse, processed: false } );
-
-				}
-
-			} );
-
-		}
-
-		function buildNode( data ) {
-
-			var objects = [];
-
-			var matrix = data.matrix;
-			var nodes = data.nodes;
-			var type = data.type;
-			var instanceCameras = data.instanceCameras;
-			var instanceControllers = data.instanceControllers;
-			var instanceLights = data.instanceLights;
-			var instanceGeometries = data.instanceGeometries;
-			var instanceNodes = data.instanceNodes;
-
-			// nodes
-
-			for ( var i = 0, l = nodes.length; i < l; i ++ ) {
-
-				objects.push( getNode( nodes[ i ] ) );
-
-			}
-
-			// instance cameras
-
-			for ( var i = 0, l = instanceCameras.length; i < l; i ++ ) {
-
-				var instanceCamera = getCamera( instanceCameras[ i ] );
-
-				if ( instanceCamera !== null ) {
-
-					objects.push( instanceCamera.clone() );
-
-				}
-
-			}
-
-			// instance controllers
-
-			for ( var i = 0, l = instanceControllers.length; i < l; i ++ ) {
-
-				var instance = instanceControllers[ i ];
-				var controller = getController( instance.id );
-				var geometries = getGeometry( controller.id );
-				var newObjects = buildObjects( geometries, instance.materials );
-
-				var skeletons = instance.skeletons;
-				var joints = controller.skin.joints;
-
-				var skeleton = buildSkeleton( skeletons, joints );
-
-				for ( var j = 0, jl = newObjects.length; j < jl; j ++ ) {
-
-					var object = newObjects[ j ];
-
-					if ( object.isSkinnedMesh ) {
-
-						object.bind( skeleton, controller.skin.bindMatrix );
-						object.normalizeSkinWeights();
-
-					}
-
-					objects.push( object );
-
-				}
-
-			}
-
-			// instance lights
-
-			for ( var i = 0, l = instanceLights.length; i < l; i ++ ) {
-
-				var instanceLight = getLight( instanceLights[ i ] );
-
-				if ( instanceLight !== null ) {
-
-					objects.push( instanceLight.clone() );
-
-				}
-
-			}
-
-			// instance geometries
-
-			for ( var i = 0, l = instanceGeometries.length; i < l; i ++ ) {
-
-				var instance = instanceGeometries[ i ];
-
-				// a single geometry instance in collada can lead to multiple object3Ds.
-				// this is the case when primitives are combined like triangles and lines
-
-				var geometries = getGeometry( instance.id );
-				var newObjects = buildObjects( geometries, instance.materials );
-
-				for ( var j = 0, jl = newObjects.length; j < jl; j ++ ) {
-
-					objects.push( newObjects[ j ] );
-
-				}
-
-			}
-
-			// instance nodes
-
-			for ( var i = 0, l = instanceNodes.length; i < l; i ++ ) {
-
-				objects.push( getNode( instanceNodes[ i ] ).clone() );
-
-			}
-
-			var object;
-
-			if ( nodes.length === 0 && objects.length === 1 ) {
-
-				object = objects[ 0 ];
-
-			} else {
-
-				object = ( type === 'JOINT' ) ? new THREE.Bone() : new THREE.Group();
-
-				for ( var i = 0; i < objects.length; i ++ ) {
-
-					object.add( objects[ i ] );
-
-				}
-
-			}
-
-			if ( object.name === '' ) {
-
-				object.name = ( type === 'JOINT' ) ? data.sid : data.name;
-
-			}
-
-			object.matrix.copy( matrix );
-			object.matrix.decompose( object.position, object.quaternion, object.scale );
-
-			return object;
-
-		}
-
-		var fallbackMaterial = new THREE.MeshBasicMaterial( { color: 0xff00ff } );
-
-		function resolveMaterialBinding( keys, instanceMaterials ) {
-
-			var materials = [];
-
-			for ( var i = 0, l = keys.length; i < l; i ++ ) {
-
-				var id = instanceMaterials[ keys[ i ] ];
-
-				if ( id === undefined ) {
-
-					console.warn( 'THREE.ColladaLoader: Material with key %s not found. Apply fallback material.', keys[ i ] );
-					materials.push( fallbackMaterial );
-
-				} else {
-
-					materials.push( getMaterial( id ) );
-
-				}
-
-			}
-
-			return materials;
-
-		}
-
-		function buildObjects( geometries, instanceMaterials ) {
-
-			var objects = [];
-
-			for ( var type in geometries ) {
-
-				var geometry = geometries[ type ];
-
-				var materials = resolveMaterialBinding( geometry.materialKeys, instanceMaterials );
-
-				// handle case if no materials are defined
-
-				if ( materials.length === 0 ) {
-
-					if ( type === 'lines' || type === 'linestrips' ) {
-
-						materials.push( new THREE.LineBasicMaterial() );
-
-					} else {
-
-						materials.push( new THREE.MeshPhongMaterial() );
-
-					}
-
-				}
-
-				// regard skinning
-
-				var skinning = ( geometry.data.attributes.skinIndex !== undefined );
-
-				if ( skinning ) {
-
-					for ( var i = 0, l = materials.length; i < l; i ++ ) {
-
-						materials[ i ].skinning = true;
-
-					}
-
-				}
-
-				// choose between a single or multi materials (material array)
-
-				var material = ( materials.length === 1 ) ? materials[ 0 ] : materials;
-
-				// now create a specific 3D object
-
-				var object;
-
-				switch ( type ) {
-
-					case 'lines':
-						object = new THREE.LineSegments( geometry.data, material );
-						break;
-
-					case 'linestrips':
-						object = new THREE.Line( geometry.data, material );
-						break;
-
-					case 'triangles':
-					case 'polylist':
-						if ( skinning ) {
-
-							object = new THREE.SkinnedMesh( geometry.data, material );
-
-						} else {
-
-							object = new THREE.Mesh( geometry.data, material );
-
-						}
-						break;
-
-				}
-
-				objects.push( object );
-
-			}
-
-			return objects;
-
-		}
-
-		function hasNode( id ) {
-
-			return library.nodes[ id ] !== undefined;
-
-		}
-
-		function getNode( id ) {
-
-			return getBuild( library.nodes[ id ], buildNode );
-
-		}
-
-		// visual scenes
-
-		function parseVisualScene( xml ) {
-
-			var data = {
-				name: xml.getAttribute( 'name' ),
-				children: []
-			};
-
-			prepareNodes( xml );
-
-			var elements = getElementsByTagName( xml, 'node' );
-
-			for ( var i = 0; i < elements.length; i ++ ) {
-
-				data.children.push( parseNode( elements[ i ] ) );
-
-			}
-
-			library.visualScenes[ xml.getAttribute( 'id' ) ] = data;
-
-		}
-
-		function buildVisualScene( data ) {
-
-			var group = new THREE.Group();
-			group.name = data.name;
-
-			var children = data.children;
-
-			for ( var i = 0; i < children.length; i ++ ) {
-
-				var child = children[ i ];
-
-				group.add( getNode( child.id ) );
-
-			}
-
-			return group;
-
-		}
-
-		function hasVisualScene( id ) {
-
-			return library.visualScenes[ id ] !== undefined;
-
-		}
-
-		function getVisualScene( id ) {
-
-			return getBuild( library.visualScenes[ id ], buildVisualScene );
-
-		}
-
-		// scenes
-
-		function parseScene( xml ) {
-
-			var instance = getElementsByTagName( xml, 'instance_visual_scene' )[ 0 ];
-			return getVisualScene( parseId( instance.getAttribute( 'url' ) ) );
-
-		}
-
-		function setupAnimations() {
-
-			var clips = library.clips;
-
-			if ( isEmpty( clips ) === true ) {
-
-				if ( isEmpty( library.animations ) === false ) {
-
-					// if there are animations but no clips, we create a default clip for playback
-
-					var tracks = [];
-
-					for ( var id in library.animations ) {
-
-						var animationTracks = getAnimation( id );
-
-						for ( var i = 0, l = animationTracks.length; i < l; i ++ ) {
-
-							tracks.push( animationTracks[ i ] );
-
-						}
-
-					}
-
-					animations.push( new THREE.AnimationClip( 'default', - 1, tracks ) );
-
-				}
-
-			} else {
-
-				for ( var id in clips ) {
-
-					animations.push( getAnimationClip( id ) );
-
-				}
-
-			}
-
-		}
-
-		if ( text.length === 0 ) {
-
-			return { scene: new THREE.Scene() };
-
-		}
-
-		var xml = new DOMParser().parseFromString( text, 'application/xml' );
-
-		var collada = getElementsByTagName( xml, 'COLLADA' )[ 0 ];
-
-		// metadata
-
-		var version = collada.getAttribute( 'version' );
-		console.log( 'THREE.ColladaLoader: File version', version );
-
-		var asset = parseAsset( getElementsByTagName( collada, 'asset' )[ 0 ] );
-		var textureLoader = new THREE.TextureLoader( this.manager );
-		textureLoader.setPath( this.resourcePath || path ).setCrossOrigin( this.crossOrigin );
-
-		var tgaLoader;
-
-		if ( THREE.TGALoader ) {
-
-			tgaLoader = new THREE.TGALoader( this.manager );
-			tgaLoader.setPath( this.resourcePath || path );
-
-		}
-
-		//
-
-		var animations = [];
-		var kinematics = {};
-		var count = 0;
-
-		//
-
-		var library = {
-			animations: {},
-			clips: {},
-			controllers: {},
-			images: {},
-			effects: {},
-			materials: {},
-			cameras: {},
-			lights: {},
-			geometries: {},
-			nodes: {},
-			visualScenes: {},
-			kinematicsModels: {},
-			physicsModels: {},
-			kinematicsScenes: {}
-		};
-
-		parseLibrary( collada, 'library_animations', 'animation', parseAnimation );
-		parseLibrary( collada, 'library_animation_clips', 'animation_clip', parseAnimationClip );
-		parseLibrary( collada, 'library_controllers', 'controller', parseController );
-		parseLibrary( collada, 'library_images', 'image', parseImage );
-		parseLibrary( collada, 'library_effects', 'effect', parseEffect );
-		parseLibrary( collada, 'library_materials', 'material', parseMaterial );
-		parseLibrary( collada, 'library_cameras', 'camera', parseCamera );
-		parseLibrary( collada, 'library_lights', 'light', parseLight );
-		parseLibrary( collada, 'library_geometries', 'geometry', parseGeometry );
-		parseLibrary( collada, 'library_nodes', 'node', parseNode );
-		parseLibrary( collada, 'library_visual_scenes', 'visual_scene', parseVisualScene );
-		parseLibrary( collada, 'library_kinematics_models', 'kinematics_model', parseKinematicsModel );
-		parseLibrary( collada, 'library_physics_models', 'physics_model', parsePhysicsModel );
-		parseLibrary( collada, 'scene', 'instance_kinematics_scene', parseKinematicsScene );
-
-		buildLibrary( library.animations, buildAnimation );
-		buildLibrary( library.clips, buildAnimationClip );
-		buildLibrary( library.controllers, buildController );
-		buildLibrary( library.images, buildImage );
-		buildLibrary( library.effects, buildEffect );
-		buildLibrary( library.materials, buildMaterial );
-		buildLibrary( library.cameras, buildCamera );
-		buildLibrary( library.lights, buildLight );
-		buildLibrary( library.geometries, buildGeometry );
-		buildLibrary( library.visualScenes, buildVisualScene );
-
-		setupAnimations();
-		setupKinematics();
-
-		var scene = parseScene( getElementsByTagName( collada, 'scene' )[ 0 ] );
-
-		if ( asset.upAxis === 'Z_UP' ) {
-
-			scene.quaternion.setFromEuler( new THREE.Euler( - Math.PI / 2, 0, 0 ) );
-
-		}
-
-		scene.scale.multiplyScalar( asset.unit );
-
-		return {
-			animations: animations,
-			kinematics: kinematics,
-			library: library,
-			scene: scene
-		};
-
-	}
-
-};
-
- return THREE.ColladaLoader;
-});
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-define('ColladaLoader',["three", "vendor/three/loaders/ColladaLoader", "lodash"], function( THREE, ThreeColladaLoader, _ ){
-    var ColladaLoader = function ()
-    {
-        ThreeColladaLoader.call( this );
-    };
-
-    ColladaLoader.prototype = _.create( ThreeColladaLoader.prototype, {
-        constructor : ColladaLoader,
-        
-        load : function(url, onLoad, onProgress, onError)
-        {
-            var scope = this;
-            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
-            
-            onLoad = onLoad || function(){};
-            
-            if( url === null || url === undefined || url === "" ) {
-                onLoad( null );
-            };
-
-            require(["text!" + url], function ( responseText ) {
-                
-                var fnc = onLoad || function(){};
-                fnc ( scope.parse( responseText, path ) );
-                
-            }, onError);
-        }
-        
-    });
-
-    return ColladaLoader;
-});
-
-
-define('LoaderSupport',["three"], function(THREE){
-/**
-  * @author Kai Salmen / https://kaisalmen.de
-  * Development repository: https://github.com/kaisalmen/WWOBJLoader
-  */
-
-
-
-if ( THREE.LoaderSupport === undefined ) {
-
-	THREE.LoaderSupport = {};
-
-}
-
-/**
- * Validation functions.
- * @class
- */
-THREE.LoaderSupport.Validator = {
-	/**
-	 * If given input is null or undefined, false is returned otherwise true.
-	 *
-	 * @param input Can be anything
-	 * @returns {boolean}
-	 */
-	isValid: function( input ) {
-		return ( input !== null && input !== undefined );
-	},
-	/**
-	 * If given input is null or undefined, the defaultValue is returned otherwise the given input.
-	 *
-	 * @param input Can be anything
-	 * @param defaultValue Can be anything
-	 * @returns {*}
-	 */
-	verifyInput: function( input, defaultValue ) {
-		return ( input === null || input === undefined ) ? defaultValue : input;
-	}
-};
-
-
-/**
- * Callbacks utilized by loaders and builders.
- * @class
- */
-THREE.LoaderSupport.Callbacks = (function () {
-
-	var Validator = THREE.LoaderSupport.Validator;
-
-	function Callbacks() {
-		this.onProgress = null;
-		this.onReportError = null;
-		this.onMeshAlter = null;
-		this.onLoad = null;
-		this.onLoadMaterials = null;
-	}
-
-	/**
-	 * Register callback function that is invoked by internal function "announceProgress" to print feedback.
-	 * @memberOf THREE.LoaderSupport.Callbacks
-	 *
-	 * @param {callback} callbackOnProgress Callback function for described functionality
-	 */
-	Callbacks.prototype.setCallbackOnProgress = function ( callbackOnProgress ) {
-		this.onProgress = Validator.verifyInput( callbackOnProgress, this.onProgress );
-	};
-
-	/**
-	 * Register callback function that is invoked when an error is reported.
-	 * @memberOf THREE.LoaderSupport.Callbacks
-	 *
-	 * @param {callback} callbackOnReportError Callback function for described functionality
-	 */
-	Callbacks.prototype.setCallbackOnReportError = function ( callbackOnReportError ) {
-		this.onReportError = Validator.verifyInput( callbackOnReportError, this.onReportError );
-	};
-
-	/**
-	 * Register callback function that is called every time a mesh was loaded.
-	 * Use {@link THREE.LoaderSupport.LoadedMeshUserOverride} for alteration instructions (geometry, material or disregard mesh).
-	 * @memberOf THREE.LoaderSupport.Callbacks
-	 *
-	 * @param {callback} callbackOnMeshAlter Callback function for described functionality
-	 */
-	Callbacks.prototype.setCallbackOnMeshAlter = function ( callbackOnMeshAlter ) {
-		this.onMeshAlter = Validator.verifyInput( callbackOnMeshAlter, this.onMeshAlter );
-	};
-
-	/**
-	 * Register callback function that is called once loading of the complete OBJ file is completed.
-	 * @memberOf THREE.LoaderSupport.Callbacks
-	 *
-	 * @param {callback} callbackOnLoad Callback function for described functionality
-	 */
-	Callbacks.prototype.setCallbackOnLoad = function ( callbackOnLoad ) {
-		this.onLoad = Validator.verifyInput( callbackOnLoad, this.onLoad );
-	};
-
-	/**
-	 * Register callback function that is called when materials have been loaded.
-	 * @memberOf THREE.LoaderSupport.Callbacks
-	 *
-	 * @param {callback} callbackOnLoadMaterials Callback function for described functionality
-	 */
-	Callbacks.prototype.setCallbackOnLoadMaterials = function ( callbackOnLoadMaterials ) {
-		this.onLoadMaterials = Validator.verifyInput( callbackOnLoadMaterials, this.onLoadMaterials );
-	};
-
-	return Callbacks;
-})();
-
-
-/**
- * Object to return by callback onMeshAlter. Used to disregard a certain mesh or to return one to many meshes.
- * @class
- *
- * @param {boolean} disregardMesh=false Tell implementation to completely disregard this mesh
- * @param {boolean} disregardMesh=false Tell implementation that mesh(es) have been altered or added
- */
-THREE.LoaderSupport.LoadedMeshUserOverride = (function () {
-
-	function LoadedMeshUserOverride( disregardMesh, alteredMesh ) {
-		this.disregardMesh = disregardMesh === true;
-		this.alteredMesh = alteredMesh === true;
-		this.meshes = [];
-	}
-
-	/**
-	 * Add a mesh created within callback.
-	 *
-	 * @memberOf THREE.OBJLoader2.LoadedMeshUserOverride
-	 *
-	 * @param {THREE.Mesh} mesh
-	 */
-	LoadedMeshUserOverride.prototype.addMesh = function ( mesh ) {
-		this.meshes.push( mesh );
-		this.alteredMesh = true;
-	};
-
-	/**
-	 * Answers if mesh shall be disregarded completely.
-	 *
-	 * @returns {boolean}
-	 */
-	LoadedMeshUserOverride.prototype.isDisregardMesh = function () {
-		return this.disregardMesh;
-	};
-
-	/**
-	 * Answers if new mesh(es) were created.
-	 *
-	 * @returns {boolean}
-	 */
-	LoadedMeshUserOverride.prototype.providesAlteredMeshes = function () {
-		return this.alteredMesh;
-	};
-
-	return LoadedMeshUserOverride;
-})();
-
-
-/**
- * A resource description used by {@link THREE.LoaderSupport.PrepData} and others.
- * @class
- *
- * @param {string} url URL to the file
- * @param {string} extension The file extension (type)
- */
-THREE.LoaderSupport.ResourceDescriptor = (function () {
-
-	var Validator = THREE.LoaderSupport.Validator;
-
-	function ResourceDescriptor( url, extension ) {
-		var urlParts = url.split( '/' );
-
-		if ( urlParts.length < 2 ) {
-
-			this.path = null;
-			this.name = url;
-			this.url = url;
-
-		} else {
-
-			this.path = Validator.verifyInput( urlParts.slice( 0, urlParts.length - 1).join( '/' ) + '/', null );
-			this.name = urlParts[ urlParts.length - 1 ];
-			this.url = url;
-
-		}
-		this.name = Validator.verifyInput( this.name, 'Unnamed_Resource' );
-		this.extension = Validator.verifyInput( extension, 'default' );
-		this.extension = this.extension.trim();
-		this.content = null;
-	}
-
-	/**
-	 * Set the content of this resource
-	 * @memberOf THREE.LoaderSupport.ResourceDescriptor
-	 *
-	 * @param {Object} content The file content as arraybuffer or text
-	 */
-	ResourceDescriptor.prototype.setContent = function ( content ) {
-		this.content = Validator.verifyInput( content, null );
-	};
-
-	return ResourceDescriptor;
-})();
-
-
-/**
- * Configuration instructions to be used by run method.
- * @class
- */
-THREE.LoaderSupport.PrepData = (function () {
-
-	var Validator = THREE.LoaderSupport.Validator;
-
-	function PrepData( modelName ) {
-		this.logging = {
-			enabled: true,
-			debug: false
-		};
-		this.modelName = Validator.verifyInput( modelName, '' );
-		this.resources = [];
-		this.callbacks = new THREE.LoaderSupport.Callbacks();
-	}
-
-	/**
-	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
-	 * @memberOf THREE.LoaderSupport.PrepData
-	 *
-	 * @param {boolean} enabled True or false.
-	 * @param {boolean} debug True or false.
-	 */
-	PrepData.prototype.setLogging = function ( enabled, debug ) {
-		this.logging.enabled = enabled === true;
-		this.logging.debug = debug === true;
-	};
-
-	/**
-	 * Returns all callbacks as {@link THREE.LoaderSupport.Callbacks}
-	 * @memberOf THREE.LoaderSupport.PrepData
-	 *
-	 * @returns {THREE.LoaderSupport.Callbacks}
-	 */
-	PrepData.prototype.getCallbacks = function () {
-		return this.callbacks;
-	};
-
-	/**
-	 * Add a resource description.
-	 * @memberOf THREE.LoaderSupport.PrepData
-	 *
-	 * @param {THREE.LoaderSupport.ResourceDescriptor} Adds a {@link THREE.LoaderSupport.ResourceDescriptor}
-	 */
-	PrepData.prototype.addResource = function ( resource ) {
-		this.resources.push( resource );
-	};
-
-	/**
-	 * Clones this object and returns it afterwards. Callbacks and resources are not cloned deep (references!).
-	 * @memberOf THREE.LoaderSupport.PrepData
-	 *
-	 * @returns {@link THREE.LoaderSupport.PrepData}
-	 */
-	PrepData.prototype.clone = function () {
-		var clone = new THREE.LoaderSupport.PrepData( this.modelName );
-		clone.logging.enabled = this.logging.enabled;
-		clone.logging.debug = this.logging.debug;
-		clone.resources = this.resources;
-		clone.callbacks = this.callbacks;
-
-		var property, value;
-		for ( property in this ) {
-
-			value = this[ property ];
-			if ( ! clone.hasOwnProperty( property ) && typeof this[ property ] !== 'function' ) {
-
-				clone[ property ] = value;
-
-			}
-		}
-
-		return clone;
-	};
-
-
-	/**
-	 * Identify files or content of interest from an Array of {@link THREE.LoaderSupport.ResourceDescriptor}.
-	 * @memberOf THREE.LoaderSupport.PrepData
-	 *
-	 * @param {THREE.LoaderSupport.ResourceDescriptor[]} resources Array of {@link THREE.LoaderSupport.ResourceDescriptor}
-	 * @param Object fileDesc Object describing which resources are of interest (ext, type (string or UInt8Array) and ignore (boolean))
-	 * @returns {{}} Object with each "ext" and the corresponding {@link THREE.LoaderSupport.ResourceDescriptor}
-	 */
-	PrepData.prototype.checkResourceDescriptorFiles = function ( resources, fileDesc ) {
-		var resource, triple, i, found;
-		var result = {};
-
-		for ( var index in resources ) {
-
-			resource = resources[ index ];
-			found = false;
-			if ( ! Validator.isValid( resource.name ) ) continue;
-			if ( Validator.isValid( resource.content ) ) {
-
-				for ( i = 0; i < fileDesc.length && !found; i++ ) {
-
-					triple = fileDesc[ i ];
-					if ( resource.extension.toLowerCase() === triple.ext.toLowerCase() ) {
-
-						if ( triple.ignore ) {
-
-							found = true;
-
-						} else if ( triple.type === "ArrayBuffer" ) {
-
-							// fast-fail on bad type
-							if ( ! ( resource.content instanceof ArrayBuffer || resource.content instanceof Uint8Array ) ) throw 'Provided content is not of type ArrayBuffer! Aborting...';
-							result[ triple.ext ] = resource;
-							found = true;
-
-						} else if ( triple.type === "String" ) {
-
-							if ( ! ( typeof( resource.content ) === 'string' || resource.content instanceof String) ) throw 'Provided  content is not of type String! Aborting...';
-							result[ triple.ext ] = resource;
-							found = true;
-
-						}
-
-					}
-
-				}
-				if ( !found ) throw 'Unidentified resource "' + resource.name + '": ' + resource.url;
-
-			} else {
-
-				// fast-fail on bad type
-				if ( ! ( typeof( resource.name ) === 'string' || resource.name instanceof String ) ) throw 'Provided file is not properly defined! Aborting...';
-				for ( i = 0; i < fileDesc.length && !found; i++ ) {
-
-					triple = fileDesc[ i ];
-					if ( resource.extension.toLowerCase() === triple.ext.toLowerCase() ) {
-
-						if ( ! triple.ignore ) result[ triple.ext ] = resource;
-						found = true;
-
-					}
-
-				}
-				if ( !found ) throw 'Unidentified resource "' + resource.name + '": ' + resource.url;
-
-			}
-		}
-
-		return result;
-	};
-
-	return PrepData;
-})();
-
-/**
- * Builds one or many THREE.Mesh from one raw set of Arraybuffers, materialGroup descriptions and further parameters.
- * Supports vertex, vertexColor, normal, uv and index buffers.
- * @class
- */
-THREE.LoaderSupport.MeshBuilder = (function () {
-
-	var LOADER_MESH_BUILDER_VERSION = '1.2.2';
-
-	var Validator = THREE.LoaderSupport.Validator;
-
-	function MeshBuilder() {
-		console.info( 'Using THREE.LoaderSupport.MeshBuilder version: ' + LOADER_MESH_BUILDER_VERSION );
-		this.logging = {
-			enabled: true,
-			debug: false
-		};
-
-		this.callbacks = new THREE.LoaderSupport.Callbacks();
-		this.materials = [];
-	}
-
-	/**
-	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
-	 * @memberOf THREE.LoaderSupport.MeshBuilder
-	 *
-	 * @param {boolean} enabled True or false.
-	 * @param {boolean} debug True or false.
-	 */
-	MeshBuilder.prototype.setLogging = function ( enabled, debug ) {
-		this.logging.enabled = enabled === true;
-		this.logging.debug = debug === true;
-	};
-
-	/**
-	 * Initializes the MeshBuilder (currently only default material initialisation).
-	 * @memberOf THREE.LoaderSupport.MeshBuilder
-	 *
-	 */
-	MeshBuilder.prototype.init = function () {
-		var defaultMaterial = new THREE.MeshStandardMaterial( { color: 0xDCF1FF } );
-		defaultMaterial.name = 'defaultMaterial';
-
-		var defaultVertexColorMaterial = new THREE.MeshStandardMaterial( { color: 0xDCF1FF } );
-		defaultVertexColorMaterial.name = 'defaultVertexColorMaterial';
-		defaultVertexColorMaterial.vertexColors = THREE.VertexColors;
-
-		var defaultLineMaterial = new THREE.LineBasicMaterial();
-		defaultLineMaterial.name = 'defaultLineMaterial';
-
-		var defaultPointMaterial = new THREE.PointsMaterial( { size: 1 } );
-		defaultPointMaterial.name = 'defaultPointMaterial';
-
-		var runtimeMaterials = {};
-		runtimeMaterials[ defaultMaterial.name ] = defaultMaterial;
-		runtimeMaterials[ defaultVertexColorMaterial.name ] = defaultVertexColorMaterial;
-		runtimeMaterials[ defaultLineMaterial.name ] = defaultLineMaterial;
-		runtimeMaterials[ defaultPointMaterial.name ] = defaultPointMaterial;
-
-		this.updateMaterials(
-			{
-				cmd: 'materialData',
-				materials: {
-					materialCloneInstructions: null,
-					serializedMaterials: null,
-					runtimeMaterials: runtimeMaterials
-				}
-			}
-		);
-	};
-
-	/**
-	 * Set materials loaded by any supplier of an Array of {@link THREE.Material}.
-	 * @memberOf THREE.LoaderSupport.MeshBuilder
-	 *
-	 * @param {THREE.Material[]} materials Array of {@link THREE.Material}
-	 */
-	MeshBuilder.prototype.setMaterials = function ( materials ) {
-		var payload = {
-			cmd: 'materialData',
-			materials: {
-				materialCloneInstructions: null,
-				serializedMaterials: null,
-				runtimeMaterials: Validator.isValid( this.callbacks.onLoadMaterials ) ? this.callbacks.onLoadMaterials( materials ) : materials
-			}
-		};
-		this.updateMaterials( payload );
-	};
-
-	MeshBuilder.prototype._setCallbacks = function ( callbacks ) {
-		if ( Validator.isValid( callbacks.onProgress ) ) this.callbacks.setCallbackOnProgress( callbacks.onProgress );
-		if ( Validator.isValid( callbacks.onReportError ) ) this.callbacks.setCallbackOnReportError( callbacks.onReportError );
-		if ( Validator.isValid( callbacks.onMeshAlter ) ) this.callbacks.setCallbackOnMeshAlter( callbacks.onMeshAlter );
-		if ( Validator.isValid( callbacks.onLoad ) ) this.callbacks.setCallbackOnLoad( callbacks.onLoad );
-		if ( Validator.isValid( callbacks.onLoadMaterials ) ) this.callbacks.setCallbackOnLoadMaterials( callbacks.onLoadMaterials );
-	};
-
-	/**
-	 * Delegates processing of the payload (mesh building or material update) to the corresponding functions (BW-compatibility).
-	 * @memberOf THREE.LoaderSupport.MeshBuilder
-	 *
-	 * @param {Object} payload Raw Mesh or Material descriptions.
-	 * @returns {THREE.Mesh[]} mesh Array of {@link THREE.Mesh} or null in case of material update
-	 */
-	MeshBuilder.prototype.processPayload = function ( payload ) {
-		if ( payload.cmd === 'meshData' ) {
-
-			return this.buildMeshes( payload );
-
-		} else if ( payload.cmd === 'materialData' ) {
-
-			this.updateMaterials( payload );
-			return null;
-
-		}
-	};
-
-	/**
-	 * Builds one or multiple meshes from the data described in the payload (buffers, params, material info).
-	 * @memberOf THREE.LoaderSupport.MeshBuilder
-	 *
-	 * @param {Object} meshPayload Raw mesh description (buffers, params, materials) used to build one to many meshes.
-	 * @returns {THREE.Mesh[]} mesh Array of {@link THREE.Mesh}
-	 */
-	MeshBuilder.prototype.buildMeshes = function ( meshPayload ) {
-		var meshName = meshPayload.params.meshName;
-
-		var bufferGeometry = new THREE.BufferGeometry();
-		bufferGeometry.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.vertices ), 3 ) );
-		if ( Validator.isValid( meshPayload.buffers.indices ) ) {
-
-			bufferGeometry.setIndex( new THREE.BufferAttribute( new Uint32Array( meshPayload.buffers.indices ), 1 ));
-
-		}
-		var haveVertexColors = Validator.isValid( meshPayload.buffers.colors );
-		if ( haveVertexColors ) {
-
-			bufferGeometry.addAttribute( 'color', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.colors ), 3 ) );
-
-		}
-		if ( Validator.isValid( meshPayload.buffers.normals ) ) {
-
-			bufferGeometry.addAttribute( 'normal', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.normals ), 3 ) );
-
-		} else {
-
-			bufferGeometry.computeVertexNormals();
-
-		}
-		if ( Validator.isValid( meshPayload.buffers.uvs ) ) {
-
-			bufferGeometry.addAttribute( 'uv', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.uvs ), 2 ) );
-
-		}
-
-		var material, materialName, key;
-		var materialNames = meshPayload.materials.materialNames;
-		var createMultiMaterial = meshPayload.materials.multiMaterial;
-		var multiMaterials = [];
-		for ( key in materialNames ) {
-
-			materialName = materialNames[ key ];
-			material = this.materials[ materialName ];
-			if ( createMultiMaterial ) multiMaterials.push( material );
-
-		}
-		if ( createMultiMaterial ) {
-
-			material = multiMaterials;
-			var materialGroups = meshPayload.materials.materialGroups;
-			var materialGroup;
-			for ( key in materialGroups ) {
-
-				materialGroup = materialGroups[ key ];
-				bufferGeometry.addGroup( materialGroup.start, materialGroup.count, materialGroup.index );
-
-			}
-
-		}
-
-		var meshes = [];
-		var mesh;
-		var callbackOnMeshAlter = this.callbacks.onMeshAlter;
-		var callbackOnMeshAlterResult;
-		var useOrgMesh = true;
-		var geometryType = Validator.verifyInput( meshPayload.geometryType, 0 );
-		if ( Validator.isValid( callbackOnMeshAlter ) ) {
-
-			callbackOnMeshAlterResult = callbackOnMeshAlter(
-				{
-					detail: {
-						meshName: meshName,
-						bufferGeometry: bufferGeometry,
-						material: material,
-						geometryType: geometryType
-					}
-				}
-			);
-			if ( Validator.isValid( callbackOnMeshAlterResult ) ) {
-
-				if ( callbackOnMeshAlterResult.isDisregardMesh() ) {
-
-					useOrgMesh = false;
-
-				} else if ( callbackOnMeshAlterResult.providesAlteredMeshes() ) {
-
-					for ( var i in callbackOnMeshAlterResult.meshes ) {
-
-						meshes.push( callbackOnMeshAlterResult.meshes[ i ] );
-
-					}
-					useOrgMesh = false;
-
-				}
-
-			}
-
-		}
-		if ( useOrgMesh ) {
-
-			if ( meshPayload.computeBoundingSphere ) bufferGeometry.computeBoundingSphere();
-			if ( geometryType === 0 ) {
-
-				mesh = new THREE.Mesh( bufferGeometry, material );
-
-			} else if ( geometryType === 1) {
-
-				mesh = new THREE.LineSegments( bufferGeometry, material );
-
-			} else {
-
-				mesh = new THREE.Points( bufferGeometry, material );
-
-			}
-			mesh.name = meshName;
-			meshes.push( mesh );
-
-		}
-
-		var progressMessage;
-		if ( Validator.isValid( meshes ) && meshes.length > 0 ) {
-
-			var meshNames = [];
-			for ( var i in meshes ) {
-
-				mesh = meshes[ i ];
-				meshNames[ i ] = mesh.name;
-
-			}
-			progressMessage = 'Adding mesh(es) (' + meshNames.length + ': ' + meshNames + ') from input mesh: ' + meshName;
-			progressMessage += ' (' + ( meshPayload.progress.numericalValue * 100 ).toFixed( 2 ) + '%)';
-
-		} else {
-
-			progressMessage = 'Not adding mesh: ' + meshName;
-			progressMessage += ' (' + ( meshPayload.progress.numericalValue * 100 ).toFixed( 2 ) + '%)';
-
-		}
-		var callbackOnProgress = this.callbacks.onProgress;
-		if ( Validator.isValid( callbackOnProgress ) ) {
-
-			var event = new CustomEvent( 'MeshBuilderEvent', {
-				detail: {
-					type: 'progress',
-					modelName: meshPayload.params.meshName,
-					text: progressMessage,
-					numericalValue: meshPayload.progress.numericalValue
-				}
-			} );
-			callbackOnProgress( event );
-
-		}
-
-		return meshes;
-	};
-
-	/**
-	 * Updates the materials with contained material objects (sync) or from alteration instructions (async).
-	 * @memberOf THREE.LoaderSupport.MeshBuilder
-	 *
-	 * @param {Object} materialPayload Material update instructions
-	 */
-	MeshBuilder.prototype.updateMaterials = function ( materialPayload ) {
-		var material, materialName;
-		var materialCloneInstructions = materialPayload.materials.materialCloneInstructions;
-		if ( Validator.isValid( materialCloneInstructions ) ) {
-
-			var materialNameOrg = materialCloneInstructions.materialNameOrg;
-			var materialOrg = this.materials[ materialNameOrg ];
-
-			if ( Validator.isValid( materialNameOrg ) ) {
-
-				material = materialOrg.clone();
-
-				materialName = materialCloneInstructions.materialName;
-				material.name = materialName;
-
-				var materialProperties = materialCloneInstructions.materialProperties;
-				for ( var key in materialProperties ) {
-
-					if ( material.hasOwnProperty( key ) && materialProperties.hasOwnProperty( key ) ) material[ key ] = materialProperties[ key ];
-
-				}
-				this.materials[ materialName ] = material;
-
-			} else {
-
-				console.warn( 'Requested material "' + materialNameOrg + '" is not available!' );
-
-			}
-		}
-
-		var materials = materialPayload.materials.serializedMaterials;
-		if ( Validator.isValid( materials ) && Object.keys( materials ).length > 0 ) {
-
-			var loader = new THREE.MaterialLoader();
-			var materialJson;
-			for ( materialName in materials ) {
-
-				materialJson = materials[ materialName ];
-				if ( Validator.isValid( materialJson ) ) {
-
-					material = loader.parse( materialJson );
-					if ( this.logging.enabled ) console.info( 'De-serialized material with name "' + materialName + '" will be added.' );
-					this.materials[ materialName ] = material;
-				}
-
-			}
-
-		}
-
-		materials = materialPayload.materials.runtimeMaterials;
-		if ( Validator.isValid( materials ) && Object.keys( materials ).length > 0 ) {
-
-			for ( materialName in materials ) {
-
-				material = materials[ materialName ];
-				if ( this.logging.enabled ) console.info( 'Material with name "' + materialName + '" will be added.' );
-				this.materials[ materialName ] = material;
-
-			}
-
-		}
-	};
-
-	/**
-	 * Returns the mapping object of material name and corresponding jsonified material.
-	 *
-	 * @returns {Object} Map of Materials in JSON representation
-	 */
-	MeshBuilder.prototype.getMaterialsJSON = function () {
-		var materialsJSON = {};
-		var material;
-		for ( var materialName in this.materials ) {
-
-			material = this.materials[ materialName ];
-			materialsJSON[ materialName ] = material.toJSON();
-		}
-
-		return materialsJSON;
-	};
-
-	/**
-	 * Returns the mapping object of material name and corresponding material.
-	 *
-	 * @returns {Object} Map of {@link THREE.Material}
-	 */
-	MeshBuilder.prototype.getMaterials = function () {
-		return this.materials;
-	};
-
-	return MeshBuilder;
-})();
-
-/**
- * Default implementation of the WorkerRunner responsible for creation and configuration of the parser within the worker.
- *
- * @class
- */
-THREE.LoaderSupport.WorkerRunnerRefImpl = (function () {
-
-	function WorkerRunnerRefImpl() {
-		var scope = this;
-		var scopedRunner = function( event ) {
-			scope.processMessage( event.data );
-		};
-		self.addEventListener( 'message', scopedRunner, false );
-	}
-
-	/**
-	 * Applies values from parameter object via set functions or via direct assignment.
-	 * @memberOf THREE.LoaderSupport.WorkerRunnerRefImpl
-	 *
-	 * @param {Object} parser The parser instance
-	 * @param {Object} params The parameter object
-	 */
-	WorkerRunnerRefImpl.prototype.applyProperties = function ( parser, params ) {
-		var property, funcName, values;
-		for ( property in params ) {
-			funcName = 'set' + property.substring( 0, 1 ).toLocaleUpperCase() + property.substring( 1 );
-			values = params[ property ];
-
-			if ( typeof parser[ funcName ] === 'function' ) {
-
-				parser[ funcName ]( values );
-
-			} else if ( parser.hasOwnProperty( property ) ) {
-
-				parser[ property ] = values;
-
-			}
-		}
-	};
-
-	/**
-	 * Configures the Parser implementation according the supplied configuration object.
-	 * @memberOf THREE.LoaderSupport.WorkerRunnerRefImpl
-	 *
-	 * @param {Object} payload Raw mesh description (buffers, params, materials) used to build one to many meshes.
-	 */
-	WorkerRunnerRefImpl.prototype.processMessage = function ( payload ) {
-		if ( payload.cmd === 'run' ) {
-
-			var callbacks = {
-				callbackMeshBuilder: function ( payload ) {
-					self.postMessage( payload );
-				},
-				callbackProgress: function ( text ) {
-					if ( payload.logging.enabled && payload.logging.debug ) console.debug( 'WorkerRunner: progress: ' + text );
-				}
-			};
-
-			// Parser is expected to be named as such
-			var parser = new Parser();
-			if ( typeof parser[ 'setLogging' ] === 'function' ) parser.setLogging( payload.logging.enabled, payload.logging.debug );
-			this.applyProperties( parser, payload.params );
-			this.applyProperties( parser, payload.materials );
-			this.applyProperties( parser, callbacks );
-			parser.workerScope = self;
-			parser.parse( payload.data.input, payload.data.options );
-
-			if ( payload.logging.enabled ) console.log( 'WorkerRunner: Run complete!' );
-
-			callbacks.callbackMeshBuilder( {
-				cmd: 'complete',
-				msg: 'WorkerRunner completed run.'
-			} );
-
-		} else {
-
-			console.error( 'WorkerRunner: Received unknown command: ' + payload.cmd );
-
-		}
-	};
-
-	return WorkerRunnerRefImpl;
-})();
-
-/**
- * This class provides means to transform existing parser code into a web worker. It defines a simple communication protocol
- * which allows to configure the worker and receive raw mesh data during execution.
- * @class
- */
-THREE.LoaderSupport.WorkerSupport = (function () {
-
-	var WORKER_SUPPORT_VERSION = '2.2.1';
-
-	var Validator = THREE.LoaderSupport.Validator;
-
-	var LoaderWorker = (function () {
-
-		function LoaderWorker() {
-			this._reset();
-		}
-
-		LoaderWorker.prototype._reset = function () {
-			this.logging = {
-				enabled: true,
-				debug: false
-			};
-			this.worker = null;
-			this.runnerImplName = null;
-			this.callbacks = {
-				meshBuilder: null,
-				onLoad: null
-			};
-			this.terminateRequested = false;
-			this.queuedMessage = null;
-			this.started = false;
-			this.forceCopy = false;
-		};
-
-		LoaderWorker.prototype.setLogging = function ( enabled, debug ) {
-			this.logging.enabled = enabled === true;
-			this.logging.debug = debug === true;
-		};
-
-		LoaderWorker.prototype.setForceCopy = function ( forceCopy ) {
-			this.forceCopy = forceCopy === true;
-		};
-
-		LoaderWorker.prototype.initWorker = function ( code, runnerImplName ) {
-			this.runnerImplName = runnerImplName;
-			var blob = new Blob( [ code ], { type: 'application/javascript' } );
-			this.worker = new Worker( window.URL.createObjectURL( blob ) );
-			this.worker.onmessage = this._receiveWorkerMessage;
-
-			// set referemce to this, then processing in worker scope within "_receiveWorkerMessage" can access members
-			this.worker.runtimeRef = this;
-
-			// process stored queuedMessage
-			this._postMessage();
-		};
-
-		/**
-		 * Executed in worker scope
- 		 */
-		LoaderWorker.prototype._receiveWorkerMessage = function ( e ) {
-			var payload = e.data;
-			switch ( payload.cmd ) {
-				case 'meshData':
-				case 'materialData':
-				case 'imageData':
-					this.runtimeRef.callbacks.meshBuilder( payload );
-					break;
-
-				case 'complete':
-					this.runtimeRef.queuedMessage = null;
-					this.started = false;
-					this.runtimeRef.callbacks.onLoad( payload.msg );
-
-					if ( this.runtimeRef.terminateRequested ) {
-
-						if ( this.runtimeRef.logging.enabled ) console.info( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Run is complete. Terminating application on request!' );
-						this.runtimeRef._terminate();
-
-					}
-					break;
-
-				case 'error':
-					console.error( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Reported error: ' + payload.msg );
-					this.runtimeRef.queuedMessage = null;
-					this.started = false;
-					this.runtimeRef.callbacks.onLoad( payload.msg );
-
-					if ( this.runtimeRef.terminateRequested ) {
-
-						if ( this.runtimeRef.logging.enabled ) console.info( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Run reported error. Terminating application on request!' );
-						this.runtimeRef._terminate();
-
-					}
-					break;
-
-				default:
-					console.error( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Received unknown command: ' + payload.cmd );
-					break;
-
-			}
-		};
-
-		LoaderWorker.prototype.setCallbacks = function ( meshBuilder, onLoad ) {
-			this.callbacks.meshBuilder = Validator.verifyInput( meshBuilder, this.callbacks.meshBuilder );
-			this.callbacks.onLoad = Validator.verifyInput( onLoad, this.callbacks.onLoad );
-		};
-
-		LoaderWorker.prototype.run = function( payload ) {
-			if ( Validator.isValid( this.queuedMessage ) ) {
-
-				console.warn( 'Already processing message. Rejecting new run instruction' );
-				return;
-
-			} else {
-
-				this.queuedMessage = payload;
-				this.started = true;
-
-			}
-			if ( ! Validator.isValid( this.callbacks.meshBuilder ) ) throw 'Unable to run as no "MeshBuilder" callback is set.';
-			if ( ! Validator.isValid( this.callbacks.onLoad ) ) throw 'Unable to run as no "onLoad" callback is set.';
-			if ( payload.cmd !== 'run' ) payload.cmd = 'run';
-			if ( Validator.isValid( payload.logging ) ) {
-
-				payload.logging.enabled = payload.logging.enabled === true;
-				payload.logging.debug = payload.logging.debug === true;
-
-			} else {
-
-				payload.logging = {
-					enabled: true,
-					debug: false
-				};
-
-			}
-			this._postMessage();
-		};
-
-		LoaderWorker.prototype._postMessage = function () {
-			if ( Validator.isValid( this.queuedMessage ) && Validator.isValid( this.worker ) ) {
-
-				if ( this.queuedMessage.data.input instanceof ArrayBuffer ) {
-
-					var content;
-					if ( this.forceCopy ) {
-
-						content = this.queuedMessage.data.input.slice( 0 );
-
-					} else {
-
-						content = this.queuedMessage.data.input;
-
-					}
-					this.worker.postMessage( this.queuedMessage, [ content ] );
-
-				} else {
-
-					this.worker.postMessage( this.queuedMessage );
-
-				}
-
-			}
-		};
-
-		LoaderWorker.prototype.setTerminateRequested = function ( terminateRequested ) {
-			this.terminateRequested = terminateRequested === true;
-			if ( this.terminateRequested && Validator.isValid( this.worker ) && ! Validator.isValid( this.queuedMessage ) && this.started ) {
-
-				if ( this.logging.enabled ) console.info( 'Worker is terminated immediately as it is not running!' );
-				this._terminate();
-
-			}
-		};
-
-		LoaderWorker.prototype._terminate = function () {
-			this.worker.terminate();
-			this._reset();
-		};
-
-		return LoaderWorker;
-
-	})();
-
-	function WorkerSupport() {
-		console.info( 'Using THREE.LoaderSupport.WorkerSupport version: ' + WORKER_SUPPORT_VERSION );
-		this.logging = {
-			enabled: true,
-			debug: false
-		};
-
-		// check worker support first
-		if ( window.Worker === undefined ) throw "This browser does not support web workers!";
-		if ( window.Blob === undefined  ) throw "This browser does not support Blob!";
-		if ( typeof window.URL.createObjectURL !== 'function'  ) throw "This browser does not support Object creation from URL!";
-
-		this.loaderWorker = new LoaderWorker();
-	}
-
-	/**
-	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
-	 * @memberOf THREE.LoaderSupport.WorkerSupport
-	 *
-	 * @param {boolean} enabled True or false.
-	 * @param {boolean} debug True or false.
-	 */
-	WorkerSupport.prototype.setLogging = function ( enabled, debug ) {
-		this.logging.enabled = enabled === true;
-		this.logging.debug = debug === true;
-		this.loaderWorker.setLogging( this.logging.enabled, this.logging.debug );
-	};
-
-	/**
-	 * Forces all ArrayBuffers to be transferred to worker to be copied.
-	 * @memberOf THREE.LoaderSupport.WorkerSupport
-	 *
-	 * @param {boolean} forceWorkerDataCopy True or false.
-	 */
-	WorkerSupport.prototype.setForceWorkerDataCopy = function ( forceWorkerDataCopy ) {
-		this.loaderWorker.setForceCopy( forceWorkerDataCopy );
-	};
-
-	/**
-	 * Validate the status of worker code and the derived worker.
-	 * @memberOf THREE.LoaderSupport.WorkerSupport
-	 *
-	 * @param {Function} functionCodeBuilder Function that is invoked with funcBuildObject and funcBuildSingleton that allows stringification of objects and singletons.
-	 * @param {String} parserName Name of the Parser object
-	 * @param {String[]} libLocations URL of libraries that shall be added to worker code relative to libPath
-	 * @param {String} libPath Base path used for loading libraries
-	 * @param {THREE.LoaderSupport.WorkerRunnerRefImpl} runnerImpl The default worker parser wrapper implementation (communication and execution). An extended class could be passed here.
-	 */
-	WorkerSupport.prototype.validate = function ( functionCodeBuilder, parserName, libLocations, libPath, runnerImpl ) {
-		if ( Validator.isValid( this.loaderWorker.worker ) ) return;
-
-		if ( this.logging.enabled ) {
-
-			console.info( 'WorkerSupport: Building worker code...' );
-			console.time( 'buildWebWorkerCode' );
-
-		}
-		if ( Validator.isValid( runnerImpl ) ) {
-
-			if ( this.logging.enabled ) console.info( 'WorkerSupport: Using "' + runnerImpl.name + '" as Runner class for worker.' );
-
-		} else {
-
-			runnerImpl = THREE.LoaderSupport.WorkerRunnerRefImpl;
-			if ( this.logging.enabled ) console.info( 'WorkerSupport: Using DEFAULT "THREE.LoaderSupport.WorkerRunnerRefImpl" as Runner class for worker.' );
-
-		}
-
-		var userWorkerCode = functionCodeBuilder( buildObject, buildSingleton );
-		userWorkerCode += 'var Parser = '+ parserName +  ';\n\n';
-		userWorkerCode += buildSingleton( runnerImpl.name, runnerImpl );
-		userWorkerCode += 'new ' + runnerImpl.name + '();\n\n';
-
-		var scope = this;
-		if ( Validator.isValid( libLocations ) && libLocations.length > 0 ) {
-
-			var libsContent = '';
-			var loadAllLibraries = function ( path, locations ) {
-				if ( locations.length === 0 ) {
-
-					scope.loaderWorker.initWorker( libsContent + userWorkerCode, runnerImpl.name );
-					if ( scope.logging.enabled ) console.timeEnd( 'buildWebWorkerCode' );
-
-				} else {
-
-					var loadedLib = function ( contentAsString ) {
-						libsContent += contentAsString;
-						loadAllLibraries( path, locations );
-					};
-
-					var fileLoader = new THREE.FileLoader();
-					fileLoader.setPath( path );
-					fileLoader.setResponseType( 'text' );
-					fileLoader.load( locations[ 0 ], loadedLib );
-					locations.shift();
-
-				}
-			};
-			loadAllLibraries( libPath, libLocations );
-
-		} else {
-
-			this.loaderWorker.initWorker( userWorkerCode, runnerImpl.name );
-			if ( this.logging.enabled ) console.timeEnd( 'buildWebWorkerCode' );
-
-		}
-	};
-
-	/**
-	 * Specify functions that should be build when new raw mesh data becomes available and when the parser is finished.
-	 * @memberOf THREE.LoaderSupport.WorkerSupport
-	 *
-	 * @param {Function} meshBuilder The mesh builder function. Default is {@link THREE.LoaderSupport.MeshBuilder}.
-	 * @param {Function} onLoad The function that is called when parsing is complete.
-	 */
-	WorkerSupport.prototype.setCallbacks = function ( meshBuilder, onLoad ) {
-		this.loaderWorker.setCallbacks( meshBuilder, onLoad );
-	};
-
-	/**
-	 * Runs the parser with the provided configuration.
-	 * @memberOf THREE.LoaderSupport.WorkerSupport
-	 *
-	 * @param {Object} payload Raw mesh description (buffers, params, materials) used to build one to many meshes.
-	 */
-	WorkerSupport.prototype.run = function ( payload ) {
-		this.loaderWorker.run( payload );
-	};
-
-	/**
-	 * Request termination of worker once parser is finished.
-	 * @memberOf THREE.LoaderSupport.WorkerSupport
-	 *
-	 * @param {boolean} terminateRequested True or false.
-	 */
-	WorkerSupport.prototype.setTerminateRequested = function ( terminateRequested ) {
-		this.loaderWorker.setTerminateRequested( terminateRequested );
-	};
-
-	var buildObject = function ( fullName, object ) {
-		var objectString = fullName + ' = {\n';
-		var part;
-		for ( var name in object ) {
-
-			part = object[ name ];
-			if ( typeof( part ) === 'string' || part instanceof String ) {
-
-				part = part.replace( '\n', '\\n' );
-				part = part.replace( '\r', '\\r' );
-				objectString += '\t' + name + ': "' + part + '",\n';
-
-			} else if ( part instanceof Array ) {
-
-				objectString += '\t' + name + ': [' + part + '],\n';
-
-			} else if ( Number.isInteger( part ) ) {
-
-				objectString += '\t' + name + ': ' + part + ',\n';
-
-			} else if ( typeof part === 'function' ) {
-
-				objectString += '\t' + name + ': ' + part + ',\n';
-
-			}
-
-		}
-		objectString += '}\n\n';
-
-		return objectString;
-	};
-
-	var buildSingleton = function ( fullName, object, internalName, basePrototypeName, ignoreFunctions ) {
-		var objectString = '';
-		var objectName = ( Validator.isValid( internalName ) ) ? internalName : object.name;
-
-		var funcString, objectPart, constructorString;
-		ignoreFunctions = Validator.verifyInput( ignoreFunctions, [] );
-		for ( var name in object.prototype ) {
-
-			objectPart = object.prototype[ name ];
-			if ( name === 'constructor' ) {
-
-				funcString = objectPart.toString();
-				funcString = funcString.replace( 'function', '' );
-				constructorString = '\tfunction ' + objectName + funcString + ';\n\n';
-
-			} else if ( typeof objectPart === 'function' ) {
-
-				if ( ignoreFunctions.indexOf( name ) < 0 ) {
-
-					funcString = objectPart.toString();
-					objectString += '\t' + objectName + '.prototype.' + name + ' = ' + funcString + ';\n\n';
-
-				}
-
-			}
-
-		}
-		objectString += '\treturn ' + objectName + ';\n';
-		objectString += '})();\n\n';
-
-		var inheritanceBlock = '';
-		if ( Validator.isValid( basePrototypeName ) ) {
-
-			inheritanceBlock += '\n';
-			inheritanceBlock += objectName + '.prototype = Object.create( ' + basePrototypeName + '.prototype );\n';
-			inheritanceBlock += objectName + '.constructor = ' + objectName + ';\n';
-			inheritanceBlock += '\n';
-		}
-		if ( ! Validator.isValid( constructorString ) ) {
-
-			constructorString = fullName + ' = (function () {\n\n';
-			constructorString += inheritanceBlock + '\t' + object.prototype.constructor.toString() + '\n\n';
-			objectString = constructorString + objectString;
-
-		} else {
-
-			objectString = fullName + ' = (function () {\n\n' + inheritanceBlock + constructorString + objectString;
-
-		}
-
-		return objectString;
-	};
-
-	return WorkerSupport;
-
-})();
-
-/**
- * Orchestrate loading of multiple OBJ files/data from an instruction queue with a configurable amount of workers (1-16).
- * Workflow:
- *   prepareWorkers
- *   enqueueForRun
- *   processQueue
- *   tearDown (to force stop)
- *
- * @class
- *
- * @param {string} classDef Class definition to be used for construction
- */
-THREE.LoaderSupport.WorkerDirector = (function () {
-
-	var LOADER_WORKER_DIRECTOR_VERSION = '2.2.2';
-
-	var Validator = THREE.LoaderSupport.Validator;
-
-	var MAX_WEB_WORKER = 16;
-	var MAX_QUEUE_SIZE = 8192;
-
-	function WorkerDirector( classDef ) {
-		console.info( 'Using THREE.LoaderSupport.WorkerDirector version: ' + LOADER_WORKER_DIRECTOR_VERSION );
-		this.logging = {
-			enabled: true,
-			debug: false
-		};
-
-		this.maxQueueSize = MAX_QUEUE_SIZE ;
-		this.maxWebWorkers = MAX_WEB_WORKER;
-		this.crossOrigin = null;
-
-		if ( ! Validator.isValid( classDef ) ) throw 'Provided invalid classDef: ' + classDef;
-
-		this.workerDescription = {
-			classDef: classDef,
-			globalCallbacks: {},
-			workerSupports: {},
-			forceWorkerDataCopy: true
-		};
-		this.objectsCompleted = 0;
-		this.instructionQueue = [];
-		this.instructionQueuePointer = 0;
-
-		this.callbackOnFinishedProcessing = null;
-	}
-
-	/**
-	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @param {boolean} enabled True or false.
-	 * @param {boolean} debug True or false.
-	 */
-	WorkerDirector.prototype.setLogging = function ( enabled, debug ) {
-		this.logging.enabled = enabled === true;
-		this.logging.debug = debug === true;
-	};
-
-	/**
-	 * Returns the maximum length of the instruction queue.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @returns {number}
-	 */
-	WorkerDirector.prototype.getMaxQueueSize = function () {
-		return this.maxQueueSize;
-	};
-
-	/**
-	 * Returns the maximum number of workers.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @returns {number}
-	 */
-	WorkerDirector.prototype.getMaxWebWorkers = function () {
-		return this.maxWebWorkers;
-	};
-
-	/**
-	 * Sets the CORS string to be used.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @param {string} crossOrigin CORS value
-	 */
-	WorkerDirector.prototype.setCrossOrigin = function ( crossOrigin ) {
-		this.crossOrigin = crossOrigin;
-	};
-
-	/**
-	 * Forces all ArrayBuffers to be transferred to worker to be copied.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @param {boolean} forceWorkerDataCopy True or false.
-	 */
-	WorkerDirector.prototype.setForceWorkerDataCopy = function ( forceWorkerDataCopy ) {
-		this.workerDescription.forceWorkerDataCopy = forceWorkerDataCopy === true;
-	};
-
-	/**
-	 * Create or destroy workers according limits. Set the name and register callbacks for dynamically created web workers.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @param {THREE.OBJLoader2.WWOBJLoader2.PrepDataCallbacks} globalCallbacks  Register global callbacks used by all web workers
-	 * @param {number} maxQueueSize Set the maximum size of the instruction queue (1-1024)
-	 * @param {number} maxWebWorkers Set the maximum amount of workers (1-16)
-	 */
-	WorkerDirector.prototype.prepareWorkers = function ( globalCallbacks, maxQueueSize, maxWebWorkers ) {
-		if ( Validator.isValid( globalCallbacks ) ) this.workerDescription.globalCallbacks = globalCallbacks;
-		this.maxQueueSize = Math.min( maxQueueSize, MAX_QUEUE_SIZE );
-		this.maxWebWorkers = Math.min( maxWebWorkers, MAX_WEB_WORKER );
-		this.maxWebWorkers = Math.min( this.maxWebWorkers, this.maxQueueSize );
-		this.objectsCompleted = 0;
-		this.instructionQueue = [];
-		this.instructionQueuePointer = 0;
-
-		for ( var instanceNo = 0; instanceNo < this.maxWebWorkers; instanceNo++ ) {
-
-			var workerSupport = new THREE.LoaderSupport.WorkerSupport();
-			workerSupport.setLogging( this.logging.enabled, this.logging.debug );
-			workerSupport.setForceWorkerDataCopy( this.workerDescription.forceWorkerDataCopy );
-			this.workerDescription.workerSupports[ instanceNo ] = {
-				instanceNo: instanceNo,
-				inUse: false,
-				terminateRequested: false,
-				workerSupport: workerSupport,
-				loader: null
-			};
-
-		}
-	};
-
-	/**
-	 * Store run instructions in internal instructionQueue.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @param {THREE.LoaderSupport.PrepData} prepData
-	 */
-	WorkerDirector.prototype.enqueueForRun = function ( prepData ) {
-		if ( this.instructionQueue.length < this.maxQueueSize ) {
-			this.instructionQueue.push( prepData );
-		}
-	};
-
-	/**
-	 * Returns if any workers are running.
-	 *
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 * @returns {boolean}
-	 */
-	WorkerDirector.prototype.isRunning = function () {
-		var wsKeys = Object.keys( this.workerDescription.workerSupports );
-		return ( ( this.instructionQueue.length > 0 && this.instructionQueuePointer < this.instructionQueue.length ) || wsKeys.length > 0 );
-	};
-
-	/**
-	 * Process the instructionQueue until it is depleted.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 */
-	WorkerDirector.prototype.processQueue = function () {
-		var prepData, supportDesc;
-		for ( var instanceNo in this.workerDescription.workerSupports ) {
-
-			supportDesc = this.workerDescription.workerSupports[ instanceNo ];
-			if ( ! supportDesc.inUse ) {
-
-				if ( this.instructionQueuePointer < this.instructionQueue.length ) {
-
-					prepData = this.instructionQueue[ this.instructionQueuePointer ];
-					this._kickWorkerRun( prepData, supportDesc );
-					this.instructionQueuePointer++;
-
-				} else {
-
-					this._deregister( supportDesc );
-
-				}
-
-			}
-
-		}
-
-		if ( ! this.isRunning() && this.callbackOnFinishedProcessing !== null ) {
-
-			this.callbackOnFinishedProcessing();
-			this.callbackOnFinishedProcessing = null;
-
-		}
-	};
-
-	WorkerDirector.prototype._kickWorkerRun = function( prepData, supportDesc ) {
-		supportDesc.inUse = true;
-		supportDesc.workerSupport.setTerminateRequested( supportDesc.terminateRequested );
-
-		if ( this.logging.enabled ) console.info( '\nAssigning next item from queue to worker (queue length: ' + this.instructionQueue.length + ')\n\n' );
-
-		var scope = this;
-		var prepDataCallbacks = prepData.getCallbacks();
-		var globalCallbacks = this.workerDescription.globalCallbacks;
-		var wrapperOnLoad = function ( event ) {
-			if ( Validator.isValid( globalCallbacks.onLoad ) ) globalCallbacks.onLoad( event );
-			if ( Validator.isValid( prepDataCallbacks.onLoad ) ) prepDataCallbacks.onLoad( event );
-			scope.objectsCompleted++;
-			supportDesc.inUse = false;
-
-			scope.processQueue();
-		};
-
-		var wrapperOnProgress = function ( event ) {
-			if ( Validator.isValid( globalCallbacks.onProgress ) ) globalCallbacks.onProgress( event );
-			if ( Validator.isValid( prepDataCallbacks.onProgress ) ) prepDataCallbacks.onProgress( event );
-		};
-
-		var wrapperOnMeshAlter = function ( event, override ) {
-			if ( Validator.isValid( globalCallbacks.onMeshAlter ) ) override = globalCallbacks.onMeshAlter( event, override );
-			if ( Validator.isValid( prepDataCallbacks.onMeshAlter ) ) override = globalCallbacks.onMeshAlter( event, override );
-			return override;
-		};
-
-		var wrapperOnLoadMaterials = function ( materials ) {
-			if ( Validator.isValid( globalCallbacks.onLoadMaterials ) ) materials = globalCallbacks.onLoadMaterials( materials );
-			if ( Validator.isValid( prepDataCallbacks.onLoadMaterials ) ) materials = prepDataCallbacks.onLoadMaterials( materials );
-			return materials;
-		};
-
-		var wrapperOnReportError = function ( errorMessage ) {
-			var continueProcessing = true;
-			if ( Validator.isValid( globalCallbacks.onReportError ) ) continueProcessing = globalCallbacks.onReportError( supportDesc, errorMessage );
-			if ( Validator.isValid( prepDataCallbacks.onReportError ) )	continueProcessing = prepDataCallbacks.onReportError( supportDesc, errorMessage );
-
-			if ( ! Validator.isValid( globalCallbacks.onReportError ) && ! Validator.isValid( prepDataCallbacks.onReportError ) ) {
-
-				console.error( 'Loader reported an error: ' );
-				console.error( errorMessage );
-
-			}
-			if ( continueProcessing ) {
-
-				supportDesc.inUse = false;
-				scope.processQueue();
-
-			}
-		};
-
-		supportDesc.loader = this._buildLoader( supportDesc.instanceNo );
-
-		var updatedCallbacks = new THREE.LoaderSupport.Callbacks();
-		updatedCallbacks.setCallbackOnLoad( wrapperOnLoad );
-		updatedCallbacks.setCallbackOnProgress( wrapperOnProgress );
-		updatedCallbacks.setCallbackOnReportError( wrapperOnReportError );
-		updatedCallbacks.setCallbackOnMeshAlter( wrapperOnMeshAlter );
-		updatedCallbacks.setCallbackOnLoadMaterials( wrapperOnLoadMaterials );
-		prepData.callbacks = updatedCallbacks;
-
-		supportDesc.loader.run( prepData, supportDesc.workerSupport );
-	};
-
-	WorkerDirector.prototype._buildLoader = function ( instanceNo ) {
-		var classDef = this.workerDescription.classDef;
-		var loader = Object.create( classDef.prototype );
-		classDef.call( loader, THREE.DefaultLoadingManager );
-
-		// verify that all required functions are implemented
-		if ( ! loader.hasOwnProperty( 'instanceNo' ) ) throw classDef.name + ' has no property "instanceNo".';
-		loader.instanceNo = instanceNo;
-
-		if ( ! loader.hasOwnProperty( 'workerSupport' ) ) {
-
-			throw classDef.name + ' has no property "workerSupport".';
-
-		}
-		if ( typeof loader.run !== 'function'  ) throw classDef.name + ' has no function "run".';
-		if ( ! loader.hasOwnProperty( 'callbacks' ) || ! Validator.isValid( loader.callbacks ) ) {
-
-			console.warn( classDef.name + ' has an invalid property "callbacks". Will change to "THREE.LoaderSupport.Callbacks"' );
-			loader.callbacks = new THREE.LoaderSupport.Callbacks();
-
-		}
-
-		return loader;
-	};
-
-	WorkerDirector.prototype._deregister = function ( supportDesc ) {
-		if ( Validator.isValid( supportDesc ) ) {
-
-			supportDesc.workerSupport.setTerminateRequested( true );
-			if ( this.logging.enabled ) console.info( 'Requested termination of worker #' + supportDesc.instanceNo + '.' );
-
-			var loaderCallbacks = supportDesc.loader.callbacks;
-			if ( Validator.isValid( loaderCallbacks.onProgress ) ) loaderCallbacks.onProgress( { detail: { text: '' } } );
-			delete this.workerDescription.workerSupports[ supportDesc.instanceNo ];
-
-		}
-	};
-
-	/**
-	 * Terminate all workers.
-	 * @memberOf THREE.LoaderSupport.WorkerDirector
-	 *
-	 * @param {callback} callbackOnFinishedProcessing Function called once all workers finished processing.
-	 */
-	WorkerDirector.prototype.tearDown = function ( callbackOnFinishedProcessing ) {
-		if ( this.logging.enabled ) console.info( 'WorkerDirector received the deregister call. Terminating all workers!' );
-
-		this.instructionQueuePointer = this.instructionQueue.length;
-		this.callbackOnFinishedProcessing = Validator.verifyInput( callbackOnFinishedProcessing, null );
-
-		for ( var name in this.workerDescription.workerSupports ) {
-
-			this.workerDescription.workerSupports[ name ].terminateRequested = true;
-
-		}
-	};
-
-	return WorkerDirector;
-
-})();
-
- return THREE.LoaderSupport;
-});
-define('vendor/three/loaders/OBJLoader2',["three", "LoaderSupport"], function(THREE, LoaderSupport){
-/**
-  * @author Kai Salmen / https://kaisalmen.de
-  * Development repository: https://github.com/kaisalmen/WWOBJLoader
-  */
-
-
-
-if ( THREE.OBJLoader2 === undefined ) { THREE.OBJLoader2 = {} }
-
-if ( THREE.LoaderSupport === undefined ) console.error( '"THREE.LoaderSupport" is not available. "THREE.OBJLoader2" requires it. Please include "LoaderSupport.js" in your HTML.' );
-
-/**
- * Use this class to load OBJ data from files or to parse OBJ data from an arraybuffer
- * @class
- *
- * @param {THREE.DefaultLoadingManager} [manager] The loadingManager for the loader to use. Default is {@link THREE.DefaultLoadingManager}
- */
-THREE.OBJLoader2 = (function () {
-
-	var OBJLOADER2_VERSION = '2.4.2';
-	var Validator = THREE.LoaderSupport.Validator;
-
-	function OBJLoader2( manager ) {
-		console.info( 'Using THREE.OBJLoader2 version: ' + OBJLOADER2_VERSION );
-
-		this.manager = Validator.verifyInput( manager, THREE.DefaultLoadingManager );
-		this.logging = {
-			enabled: true,
-			debug: false
-		};
-
-		this.modelName = '';
-		this.instanceNo = 0;
-		this.path = '';
-		this.useIndices = false;
-		this.disregardNormals = false;
-		this.materialPerSmoothingGroup = false;
-		this.useOAsMesh = false;
-		this.loaderRootNode = new THREE.Group();
-
-		this.meshBuilder = new THREE.LoaderSupport.MeshBuilder();
-		this.callbacks = new THREE.LoaderSupport.Callbacks();
-		this.workerSupport = new THREE.LoaderSupport.WorkerSupport();
-		this.terminateWorkerOnLoad = true;
-	}
-
-	/**
-	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {boolean} enabled True or false.
-	 * @param {boolean} debug True or false.
-	 */
-	OBJLoader2.prototype.setLogging = function ( enabled, debug ) {
-		this.logging.enabled = enabled === true;
-		this.logging.debug = debug === true;
-		this.meshBuilder.setLogging( this.logging.enabled, this.logging.debug );
-	};
-
-	/**
-	 * Set the name of the model.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {string} modelName
-	 */
-	OBJLoader2.prototype.setModelName = function ( modelName ) {
-		this.modelName = Validator.verifyInput( modelName, this.modelName );
-	};
-
-	/**
-	 * The URL of the base path.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {string} path URL
-	 */
-	OBJLoader2.prototype.setPath = function ( path ) {
-		this.path = Validator.verifyInput( path, this.path );
-	};
-
-	/**
-	 * Set the node where the loaded objects will be attached directly.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {THREE.Object3D} streamMeshesTo Object already attached to scenegraph where new meshes will be attached to
-	 */
-	OBJLoader2.prototype.setStreamMeshesTo = function ( streamMeshesTo ) {
-		this.loaderRootNode = Validator.verifyInput( streamMeshesTo, this.loaderRootNode );
-	};
-
-	/**
-	 * Set materials loaded by MTLLoader or any other supplier of an Array of {@link THREE.Material}.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {THREE.Material[]} materials Array of {@link THREE.Material}
-	 */
-	OBJLoader2.prototype.setMaterials = function ( materials ) {
-		this.meshBuilder.setMaterials( materials );
-	};
-
-	/**
-	 * Instructs loaders to create indexed {@link THREE.BufferGeometry}.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {boolean} useIndices=false
-	 */
-	OBJLoader2.prototype.setUseIndices = function ( useIndices ) {
-		this.useIndices = useIndices === true;
-	};
-
-	/**
-	 * Tells whether normals should be completely disregarded and regenerated.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {boolean} disregardNormals=false
-	 */
-	OBJLoader2.prototype.setDisregardNormals = function ( disregardNormals ) {
-		this.disregardNormals = disregardNormals === true;
-	};
-
-	/**
-	 * Tells whether a material shall be created per smoothing group.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {boolean} materialPerSmoothingGroup=false
-	 */
-	OBJLoader2.prototype.setMaterialPerSmoothingGroup = function ( materialPerSmoothingGroup ) {
-		this.materialPerSmoothingGroup = materialPerSmoothingGroup === true;
-	};
-
-	/**
-	 * Usually 'o' is meta-information and does not result in creation of new meshes, but mesh creation on occurrence of "o" can be enforced.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {boolean} useOAsMesh=false
-	 */
-	OBJLoader2.prototype.setUseOAsMesh = function ( useOAsMesh ) {
-		this.useOAsMesh = useOAsMesh === true;
-	};
-
-	OBJLoader2.prototype._setCallbacks = function ( callbacks ) {
-		if ( Validator.isValid( callbacks.onProgress ) ) this.callbacks.setCallbackOnProgress( callbacks.onProgress );
-		if ( Validator.isValid( callbacks.onReportError ) ) this.callbacks.setCallbackOnReportError( callbacks.onReportError );
-		if ( Validator.isValid( callbacks.onMeshAlter ) ) this.callbacks.setCallbackOnMeshAlter( callbacks.onMeshAlter );
-		if ( Validator.isValid( callbacks.onLoad ) ) this.callbacks.setCallbackOnLoad( callbacks.onLoad );
-		if ( Validator.isValid( callbacks.onLoadMaterials ) ) this.callbacks.setCallbackOnLoadMaterials( callbacks.onLoadMaterials );
-
-		this.meshBuilder._setCallbacks( this.callbacks );
-	};
-
-	/**
-	 * Announce feedback which is give to the registered callbacks.
-	 * @memberOf THREE.OBJLoader2
-	 * @private
-	 *
-	 * @param {string} type The type of event
-	 * @param {string} text Textual description of the event
-	 * @param {number} numericalValue Numerical value describing the progress
-	 */
-	OBJLoader2.prototype.onProgress = function ( type, text, numericalValue ) {
-		var content = Validator.isValid( text ) ? text: '';
-		var event = {
-			detail: {
-				type: type,
-				modelName: this.modelName,
-				instanceNo: this.instanceNo,
-				text: content,
-				numericalValue: numericalValue
-			}
-		};
-
-		if ( Validator.isValid( this.callbacks.onProgress ) ) this.callbacks.onProgress( event );
-
-		if ( this.logging.enabled && this.logging.debug ) console.debug( content );
-	};
-
-	OBJLoader2.prototype._onError = function ( event ) {
-		var output = 'Error occurred while downloading!';
-
-		if ( event.currentTarget && event.currentTarget.statusText !== null ) {
-
-			output += '\nurl: ' + event.currentTarget.responseURL + '\nstatus: ' + event.currentTarget.statusText;
-
-		}
-		this.onProgress( 'error', output, -1 );
-		this._throwError( output );
-	};
-
-	OBJLoader2.prototype._throwError = function ( errorMessage ) {
-		if ( Validator.isValid( this.callbacks.onReportError ) )  {
-
-			this.callbacks.onReportError( errorMessage );
-
-		} else {
-
-			throw errorMessage;
-
-		}
-	};
-
-	/**
-	 * Use this convenient method to load a file at the given URL. By default the fileLoader uses an ArrayBuffer.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {string}  url A string containing the path/URL of the file to be loaded.
-	 * @param {callback} onLoad A function to be called after loading is successfully completed. The function receives loaded Object3D as an argument.
-	 * @param {callback} [onProgress] A function to be called while the loading is in progress. The argument will be the XMLHttpRequest instance, which contains total and Integer bytes.
-	 * @param {callback} [onError] A function to be called if an error occurs during loading. The function receives the error as an argument.
-	 * @param {callback} [onMeshAlter] A function to be called after a new mesh raw data becomes available for alteration.
-	 * @param {boolean} [useAsync] If true, uses async loading with worker, if false loads data synchronously.
-	 */
-	OBJLoader2.prototype.load = function ( url, onLoad, onProgress, onError, onMeshAlter, useAsync ) {
-		var resource = new THREE.LoaderSupport.ResourceDescriptor( url, 'OBJ' );
-		this._loadObj( resource, onLoad, onProgress, onError, onMeshAlter, useAsync );
-	};
-
-	OBJLoader2.prototype._loadObj = function ( resource, onLoad, onProgress, onError, onMeshAlter, useAsync ) {
-		var scope = this;
-		if ( ! Validator.isValid( onError ) ) {
-			onError = function ( event ) {
-				scope._onError( event );
-			};
-		}
-
-		// fast-fail
-		if ( ! Validator.isValid( resource ) ) onError( 'An invalid ResourceDescriptor was provided. Unable to continue!' );
-		var fileLoaderOnLoad = function ( content ) {
-
-			resource.content = content;
-			if ( useAsync ) {
-
-				scope.parseAsync( content, onLoad );
-
-			} else {
-
-				var callbacks = new THREE.LoaderSupport.Callbacks();
-				callbacks.setCallbackOnMeshAlter( onMeshAlter );
-				scope._setCallbacks( callbacks );
-				onLoad(
-					{
-						detail: {
-							loaderRootNode: scope.parse( content ),
-							modelName: scope.modelName,
-							instanceNo: scope.instanceNo
-						}
-					}
-				);
-
-			}
-		};
-
-		// fast-fail
-		if ( ! Validator.isValid( resource.url ) || Validator.isValid( resource.content ) ) {
-
-			fileLoaderOnLoad( Validator.isValid( resource.content ) ? resource.content : null );
-
-		} else {
-
-			if ( ! Validator.isValid( onProgress ) ) {
-				var numericalValueRef = 0;
-				var numericalValue = 0;
-				onProgress = function ( event ) {
-					if ( ! event.lengthComputable ) return;
-
-					numericalValue = event.loaded / event.total;
-					if ( numericalValue > numericalValueRef ) {
-
-						numericalValueRef = numericalValue;
-						var output = 'Download of "' + resource.url + '": ' + ( numericalValue * 100 ).toFixed( 2 ) + '%';
-						scope.onProgress( 'progressLoad', output, numericalValue );
-
-					}
-				};
-			}
-
-
-			var fileLoader = new THREE.FileLoader( this.manager );
-			fileLoader.setPath( this.path );
-			fileLoader.setResponseType( 'arraybuffer' );
-			fileLoader.load( resource.url, fileLoaderOnLoad, onProgress, onError );
-
-		}
-	};
-
-
-	/**
-	 * Run the loader according the provided instructions.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {THREE.LoaderSupport.PrepData} prepData All parameters and resources required for execution
-	 * @param {THREE.LoaderSupport.WorkerSupport} [workerSupportExternal] Use pre-existing WorkerSupport
-	 */
-	OBJLoader2.prototype.run = function ( prepData, workerSupportExternal ) {
-		this._applyPrepData( prepData );
-		var available = prepData.checkResourceDescriptorFiles( prepData.resources,
-			[
-				{ ext: "obj", type: "ArrayBuffer", ignore: false },
-				{ ext: "mtl", type: "String", ignore: false },
-				{ ext: "zip", type: "String", ignore: true }
-			]
-		);
-		if ( Validator.isValid( workerSupportExternal ) ) {
-
-			this.terminateWorkerOnLoad = false;
-			this.workerSupport = workerSupportExternal;
-			this.logging.enabled = this.workerSupport.logging.enabled;
-			this.logging.debug = this.workerSupport.logging.debug;
-
-		}
-		var scope = this;
-		var onMaterialsLoaded = function ( materials ) {
-			if ( materials !== null ) scope.meshBuilder.setMaterials( materials );
-			scope._loadObj( available.obj, scope.callbacks.onLoad, null, null, scope.callbacks.onMeshAlter, prepData.useAsync );
-
-		};
-		this._loadMtl( available.mtl, onMaterialsLoaded, null, null, prepData.crossOrigin, prepData.materialOptions );
-	};
-
-	OBJLoader2.prototype._applyPrepData = function ( prepData ) {
-		if ( Validator.isValid( prepData ) ) {
-
-			this.setLogging( prepData.logging.enabled, prepData.logging.debug );
-			this.setModelName( prepData.modelName );
-			this.setStreamMeshesTo( prepData.streamMeshesTo );
-			this.meshBuilder.setMaterials( prepData.materials );
-			this.setUseIndices( prepData.useIndices );
-			this.setDisregardNormals( prepData.disregardNormals );
-			this.setMaterialPerSmoothingGroup( prepData.materialPerSmoothingGroup );
-			this.setUseOAsMesh( prepData.useOAsMesh );
-
-			this._setCallbacks( prepData.getCallbacks() );
-
-		}
-	};
-
-	/**
-	 * Parses OBJ data synchronously from arraybuffer or string.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {arraybuffer|string} content OBJ data as Uint8Array or String
-	 */
-	OBJLoader2.prototype.parse = function ( content ) {
-		// fast-fail in case of illegal data
-		if ( ! Validator.isValid( content ) ) {
-
-			console.warn( 'Provided content is not a valid ArrayBuffer or String.' );
-			return this.loaderRootNode;
-
-		}
-		if ( this.logging.enabled ) console.time( 'OBJLoader2 parse: ' + this.modelName );
-		this.meshBuilder.init();
-
-		var parser = new Parser();
-		parser.setLogging( this.logging.enabled, this.logging.debug );
-		parser.setMaterialPerSmoothingGroup( this.materialPerSmoothingGroup );
-		parser.setUseOAsMesh( this.useOAsMesh );
-		parser.setUseIndices( this.useIndices );
-		parser.setDisregardNormals( this.disregardNormals );
-		// sync code works directly on the material references
-		parser.setMaterials( this.meshBuilder.getMaterials() );
-
-		var scope = this;
-		var onMeshLoaded = function ( payload ) {
-			var meshes = scope.meshBuilder.processPayload( payload );
-			var mesh;
-			for ( var i in meshes ) {
-				mesh = meshes[ i ];
-				scope.loaderRootNode.add( mesh );
-			}
-		};
-		parser.setCallbackMeshBuilder( onMeshLoaded );
-		var onProgressScoped = function ( text, numericalValue ) {
-			scope.onProgress( 'progressParse', text, numericalValue );
-		};
-		parser.setCallbackProgress( onProgressScoped );
-
-		if ( content instanceof ArrayBuffer || content instanceof Uint8Array ) {
-
-			if ( this.logging.enabled ) console.info( 'Parsing arrayBuffer...' );
-			parser.parse( content );
-
-		} else if ( typeof( content ) === 'string' || content instanceof String ) {
-
-			if ( this.logging.enabled ) console.info( 'Parsing text...' );
-			parser.parseText( content );
-
-		} else {
-
-			this._throwError( 'Provided content was neither of type String nor Uint8Array! Aborting...' );
-
-		}
-		if ( this.logging.enabled ) console.timeEnd( 'OBJLoader2 parse: ' + this.modelName );
-
-		return this.loaderRootNode;
-	};
-
-	/**
-	 * Parses OBJ content asynchronously from arraybuffer.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {arraybuffer} content OBJ data as Uint8Array
-	 * @param {callback} onLoad Called after worker successfully completed loading
-	 */
-	OBJLoader2.prototype.parseAsync = function ( content, onLoad ) {
-		var scope = this;
-		var measureTime = false;
-		var scopedOnLoad = function () {
-			onLoad(
-				{
-					detail: {
-						loaderRootNode: scope.loaderRootNode,
-						modelName: scope.modelName,
-						instanceNo: scope.instanceNo
-					}
-				}
-			);
-			if ( measureTime && scope.logging.enabled ) console.timeEnd( 'OBJLoader2 parseAsync: ' + scope.modelName );
-		};
-		// fast-fail in case of illegal data
-		if ( ! Validator.isValid( content ) ) {
-
-			console.warn( 'Provided content is not a valid ArrayBuffer.' );
-			scopedOnLoad();
-
-		} else {
-
-			measureTime = true;
-
-		}
-		if ( measureTime && this.logging.enabled ) console.time( 'OBJLoader2 parseAsync: ' + this.modelName );
-		this.meshBuilder.init();
-
-		var scopedOnMeshLoaded = function ( payload ) {
-			var meshes = scope.meshBuilder.processPayload( payload );
-			var mesh;
-			for ( var i in meshes ) {
-				mesh = meshes[ i ];
-				scope.loaderRootNode.add( mesh );
-			}
-		};
-		var buildCode = function ( funcBuildObject, funcBuildSingleton ) {
-			var workerCode = '';
-			workerCode += '/**\n';
-			workerCode += '  * This code was constructed by OBJLoader2 buildCode.\n';
-			workerCode += '  */\n\n';
-			workerCode += 'THREE = { LoaderSupport: {} };\n\n';
-			workerCode += funcBuildObject( 'THREE.LoaderSupport.Validator', Validator );
-			workerCode += funcBuildSingleton( 'Parser', Parser );
-
-			return workerCode;
-		};
-		this.workerSupport.validate( buildCode, 'Parser' );
-		this.workerSupport.setCallbacks( scopedOnMeshLoaded, scopedOnLoad );
-		if ( scope.terminateWorkerOnLoad ) this.workerSupport.setTerminateRequested( true );
-
-		var materialNames = {};
-		var materials = this.meshBuilder.getMaterials();
-		for ( var materialName in materials ) {
-
-			materialNames[ materialName ] = materialName;
-
-		}
-		this.workerSupport.run(
-			{
-				params: {
-					useAsync: true,
-					materialPerSmoothingGroup: this.materialPerSmoothingGroup,
-					useOAsMesh: this.useOAsMesh,
-					useIndices: this.useIndices,
-					disregardNormals: this.disregardNormals
-				},
-				logging: {
-					enabled: this.logging.enabled,
-					debug: this.logging.debug
-				},
-				materials: {
-					// in async case only material names are supplied to parser
-					materials: materialNames
-				},
-				data: {
-					input: content,
-					options: null
-				}
-			}
-		);
-	};
-
-
-	/**
-	 * Parse OBJ data either from ArrayBuffer or string
-	 * @class
-	 */
-	var Parser = (function () {
-
-		function Parser() {
-			this.callbackProgress = null;
-			this.callbackMeshBuilder = null;
-			this.contentRef = null;
-			this.legacyMode = false;
-
-			this.materials = {};
-			this.useAsync = false;
-			this.materialPerSmoothingGroup = false;
-			this.useOAsMesh = false;
-			this.useIndices = false;
-			this.disregardNormals = false;
-
-			this.vertices = [];
-			this.colors = [];
-			this.normals = [];
-			this.uvs = [];
-
-			this.rawMesh = {
-				objectName: '',
-				groupName: '',
-				activeMtlName: '',
-				mtllibName: '',
-
-				// reset with new mesh
-				faceType: -1,
-				subGroups: [],
-				subGroupInUse: null,
-				smoothingGroup: {
-					splitMaterials: false,
-					normalized: -1,
-					real: -1
-				},
-				counts: {
-					doubleIndicesCount: 0,
-					faceCount: 0,
-					mtlCount: 0,
-					smoothingGroupCount: 0
-				}
-			};
-
-			this.inputObjectCount = 1;
-			this.outputObjectCount = 1;
-			this.globalCounts = {
-				vertices: 0,
-				faces: 0,
-				doubleIndicesCount: 0,
-				lineByte: 0,
-				currentByte: 0,
-				totalBytes: 0
-			};
-
-			this.logging = {
-				enabled: true,
-				debug: false
-			};
-		}
-
-		Parser.prototype.resetRawMesh = function () {
-			// faces are stored according combined index of group, material and smoothingGroup (0 or not)
-			this.rawMesh.subGroups = [];
-			this.rawMesh.subGroupInUse = null;
-			this.rawMesh.smoothingGroup.normalized = -1;
-			this.rawMesh.smoothingGroup.real = -1;
-
-			// this default index is required as it is possible to define faces without 'g' or 'usemtl'
-			this.pushSmoothingGroup( 1 );
-
-			this.rawMesh.counts.doubleIndicesCount = 0;
-			this.rawMesh.counts.faceCount = 0;
-			this.rawMesh.counts.mtlCount = 0;
-			this.rawMesh.counts.smoothingGroupCount = 0;
-		};
-
-		Parser.prototype.setUseAsync = function ( useAsync ) {
-			this.useAsync = useAsync;
-		};
-
-		Parser.prototype.setMaterialPerSmoothingGroup = function ( materialPerSmoothingGroup ) {
-			this.materialPerSmoothingGroup = materialPerSmoothingGroup;
-		};
-
-		Parser.prototype.setUseOAsMesh = function ( useOAsMesh ) {
-			this.useOAsMesh = useOAsMesh;
-		};
-
-		Parser.prototype.setUseIndices = function ( useIndices ) {
-			this.useIndices = useIndices;
-		};
-
-		Parser.prototype.setDisregardNormals = function ( disregardNormals ) {
-			this.disregardNormals = disregardNormals;
-		};
-
-		Parser.prototype.setMaterials = function ( materials ) {
-			this.materials = THREE.LoaderSupport.Validator.verifyInput( materials, this.materials );
-			this.materials = THREE.LoaderSupport.Validator.verifyInput( this.materials, {} );
-		};
-
-		Parser.prototype.setCallbackMeshBuilder = function ( callbackMeshBuilder ) {
-			if ( ! THREE.LoaderSupport.Validator.isValid( callbackMeshBuilder ) ) {
-
-				this._throwError( 'Unable to run as no "MeshBuilder" callback is set.' );
-
-			}
-			this.callbackMeshBuilder = callbackMeshBuilder;
-		};
-
-		Parser.prototype.setCallbackProgress = function ( callbackProgress ) {
-			this.callbackProgress = callbackProgress;
-		};
-
-		Parser.prototype.setLogging = function ( enabled, debug ) {
-			this.logging.enabled = enabled === true;
-			this.logging.debug = debug === true;
-		};
-
-		Parser.prototype.configure = function () {
-			this.pushSmoothingGroup( 1 );
-
-			if ( this.logging.enabled ) {
-
-				var matKeys = Object.keys( this.materials );
-				var matNames = ( matKeys.length > 0 ) ? '\n\tmaterialNames:\n\t\t- ' + matKeys.join( '\n\t\t- ' ) : '\n\tmaterialNames: None';
-				var printedConfig = 'OBJLoader2.Parser configuration:'
-					+ matNames
-					+ '\n\tuseAsync: ' + this.useAsync
-					+ '\n\tmaterialPerSmoothingGroup: ' + this.materialPerSmoothingGroup
-					+ '\n\tuseOAsMesh: ' + this.useOAsMesh
-					+ '\n\tuseIndices: ' + this.useIndices
-					+ '\n\tdisregardNormals: ' + this.disregardNormals
-					+ '\n\tcallbackMeshBuilderName: ' + this.callbackMeshBuilder.name
-					+ '\n\tcallbackProgressName: ' + this.callbackProgress.name;
-				console.info( printedConfig );
-			}
-		};
-
-		/**
-		 * Parse the provided arraybuffer
-		 * @memberOf Parser
-		 *
-		 * @param {Uint8Array} arrayBuffer OBJ data as Uint8Array
-		 */
-		Parser.prototype.parse = function ( arrayBuffer ) {
-			if ( this.logging.enabled ) console.time( 'OBJLoader2.Parser.parse' );
-			this.configure();
-
-			var arrayBufferView = new Uint8Array( arrayBuffer );
-			this.contentRef = arrayBufferView;
-			var length = arrayBufferView.byteLength;
-			this.globalCounts.totalBytes = length;
-			var buffer = new Array( 128 );
-
-			for ( var code, word = '', bufferPointer = 0, slashesCount = 0, i = 0; i < length; i++ ) {
-
-				code = arrayBufferView[ i ];
-				switch ( code ) {
-					// space
-					case 32:
-						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
-						word = '';
-						break;
-					// slash
-					case 47:
-						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
-						slashesCount++;
-						word = '';
-						break;
-
-					// LF
-					case 10:
-						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
-						word = '';
-						this.globalCounts.lineByte = this.globalCounts.currentByte;
-						this.globalCounts.currentByte = i;
-						this.processLine( buffer, bufferPointer, slashesCount );
-						bufferPointer = 0;
-						slashesCount = 0;
-						break;
-
-					// CR
-					case 13:
-						break;
-
-					default:
-						word += String.fromCharCode( code );
-						break;
-				}
-			}
-			this.finalizeParsing();
-			if ( this.logging.enabled ) console.timeEnd(  'OBJLoader2.Parser.parse' );
-		};
-
-		/**
-		 * Parse the provided text
-		 * @memberOf Parser
-		 *
-		 * @param {string} text OBJ data as string
-		 */
-		Parser.prototype.parseText = function ( text ) {
-			if ( this.logging.enabled ) console.time(  'OBJLoader2.Parser.parseText' );
-			this.configure();
-			this.legacyMode = true;
-			this.contentRef = text;
-			var length = text.length;
-			this.globalCounts.totalBytes = length;
-			var buffer = new Array( 128 );
-
-			for ( var char, word = '', bufferPointer = 0, slashesCount = 0, i = 0; i < length; i++ ) {
-
-				char = text[ i ];
-				switch ( char ) {
-					case ' ':
-						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
-						word = '';
-						break;
-
-					case '/':
-						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
-						slashesCount++;
-						word = '';
-						break;
-
-					case '\n':
-						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
-						word = '';
-						this.globalCounts.lineByte = this.globalCounts.currentByte;
-						this.globalCounts.currentByte = i;
-						this.processLine( buffer, bufferPointer, slashesCount );
-						bufferPointer = 0;
-						slashesCount = 0;
-						break;
-
-					case '\r':
-						break;
-
-					default:
-						word += char;
-				}
-			}
-			this.finalizeParsing();
-			if ( this.logging.enabled ) console.timeEnd( 'OBJLoader2.Parser.parseText' );
-		};
-
-		Parser.prototype.processLine = function ( buffer, bufferPointer, slashesCount ) {
-			if ( bufferPointer < 1 ) return;
-
-			var reconstructString = function ( content, legacyMode, start, stop ) {
-				var line = '';
-				if ( stop > start ) {
-
-					var i;
-					if ( legacyMode ) {
-
-						for ( i = start; i < stop; i++ ) line += content[ i ];
-
-					} else {
-
-
-						for ( i = start; i < stop; i++ ) line += String.fromCharCode( content[ i ] );
-
-					}
-					line = line.trim();
-
-				}
-				return line;
-			};
-
-			var bufferLength, length, i, lineDesignation;
-			lineDesignation = buffer [ 0 ];
-			switch ( lineDesignation ) {
-				case 'v':
-					this.vertices.push( parseFloat( buffer[ 1 ] ) );
-					this.vertices.push( parseFloat( buffer[ 2 ] ) );
-					this.vertices.push( parseFloat( buffer[ 3 ] ) );
-					if ( bufferPointer > 4 ) {
-
-						this.colors.push( parseFloat( buffer[ 4 ] ) );
-						this.colors.push( parseFloat( buffer[ 5 ] ) );
-						this.colors.push( parseFloat( buffer[ 6 ] ) );
-
-					}
-					break;
-
-				case 'vt':
-					this.uvs.push( parseFloat( buffer[ 1 ] ) );
-					this.uvs.push( parseFloat( buffer[ 2 ] ) );
-					break;
-
-				case 'vn':
-					this.normals.push( parseFloat( buffer[ 1 ] ) );
-					this.normals.push( parseFloat( buffer[ 2 ] ) );
-					this.normals.push( parseFloat( buffer[ 3 ] ) );
-					break;
-
-				case 'f':
-					bufferLength = bufferPointer - 1;
-
-					// "f vertex ..."
-					if ( slashesCount === 0 ) {
-
-						this.checkFaceType( 0 );
-						for ( i = 2, length = bufferLength; i < length; i ++ ) {
-
-							this.buildFace( buffer[ 1 ] );
-							this.buildFace( buffer[ i ] );
-							this.buildFace( buffer[ i + 1 ] );
-
-						}
-
-					// "f vertex/uv ..."
-					} else if  ( bufferLength === slashesCount * 2 ) {
-
-						this.checkFaceType( 1 );
-						for ( i = 3, length = bufferLength - 2; i < length; i += 2 ) {
-
-							this.buildFace( buffer[ 1 ], buffer[ 2 ] );
-							this.buildFace( buffer[ i ], buffer[ i + 1 ] );
-							this.buildFace( buffer[ i + 2 ], buffer[ i + 3 ] );
-
-						}
-
-					// "f vertex/uv/normal ..."
-					} else if  ( bufferLength * 2 === slashesCount * 3 ) {
-
-						this.checkFaceType( 2 );
-						for ( i = 4, length = bufferLength - 3; i < length; i += 3 ) {
-
-							this.buildFace( buffer[ 1 ], buffer[ 2 ], buffer[ 3 ] );
-							this.buildFace( buffer[ i ], buffer[ i + 1 ], buffer[ i + 2 ] );
-							this.buildFace( buffer[ i + 3 ], buffer[ i + 4 ], buffer[ i + 5 ] );
-
-						}
-
-					// "f vertex//normal ..."
-					} else {
-
-						this.checkFaceType( 3 );
-						for ( i = 3, length = bufferLength - 2; i < length; i += 2 ) {
-
-							this.buildFace( buffer[ 1 ], undefined, buffer[ 2 ] );
-							this.buildFace( buffer[ i ], undefined, buffer[ i + 1 ] );
-							this.buildFace( buffer[ i + 2 ], undefined, buffer[ i + 3 ] );
-
-						}
-
-					}
-					break;
-
-				case 'l':
-				case 'p':
-					bufferLength = bufferPointer - 1;
-					if ( bufferLength === slashesCount * 2 )  {
-
-						this.checkFaceType( 4 );
-						for ( i = 1, length = bufferLength + 1; i < length; i += 2 ) this.buildFace( buffer[ i ], buffer[ i + 1 ] );
-
-					} else {
-
-						this.checkFaceType( ( lineDesignation === 'l' ) ? 5 : 6  );
-						for ( i = 1, length = bufferLength + 1; i < length; i ++ ) this.buildFace( buffer[ i ] );
-
-					}
-					break;
-
-				case 's':
-					this.pushSmoothingGroup( buffer[ 1 ] );
-					break;
-
-				case 'g':
-					// 'g' leads to creation of mesh if valid data (faces declaration was done before), otherwise only groupName gets set
-					this.processCompletedMesh();
-					this.rawMesh.groupName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 2, this.globalCounts.currentByte );
-					break;
-
-				case 'o':
-					// 'o' is meta-information and usually does not result in creation of new meshes, but can be enforced with "useOAsMesh"
-					if ( this.useOAsMesh ) this.processCompletedMesh();
-					this.rawMesh.objectName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 2, this.globalCounts.currentByte );
-					break;
-
-				case 'mtllib':
-					this.rawMesh.mtllibName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 7, this.globalCounts.currentByte );
-					break;
-
-				case 'usemtl':
-					var mtlName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 7, this.globalCounts.currentByte );
-					if ( mtlName !== '' && this.rawMesh.activeMtlName !== mtlName ) {
-
-						this.rawMesh.activeMtlName = mtlName;
-						this.rawMesh.counts.mtlCount++;
-						this.checkSubGroup();
-
-					}
-					break;
-
-				default:
-					break;
-			}
-		};
-
-		Parser.prototype.pushSmoothingGroup = function ( smoothingGroup ) {
-			var smoothingGroupInt = parseInt( smoothingGroup );
-			if ( isNaN( smoothingGroupInt ) ) {
-				smoothingGroupInt = smoothingGroup === "off" ? 0 : 1;
-			}
-
-			var smoothCheck = this.rawMesh.smoothingGroup.normalized;
-			this.rawMesh.smoothingGroup.normalized = this.rawMesh.smoothingGroup.splitMaterials ? smoothingGroupInt : ( smoothingGroupInt === 0 ) ? 0 : 1;
-			this.rawMesh.smoothingGroup.real = smoothingGroupInt;
-
-			if ( smoothCheck !== smoothingGroupInt ) {
-
-				this.rawMesh.counts.smoothingGroupCount++;
-				this.checkSubGroup();
-
-			}
-		};
-
-		/**
-		 * Expanded faceTypes include all four face types, both line types and the point type
-		 * faceType = 0: "f vertex ..."
-		 * faceType = 1: "f vertex/uv ..."
-		 * faceType = 2: "f vertex/uv/normal ..."
-		 * faceType = 3: "f vertex//normal ..."
-		 * faceType = 4: "l vertex/uv ..." or "l vertex ..."
-		 * faceType = 5: "l vertex ..."
-		 * faceType = 6: "p vertex ..."
-		 */
-		Parser.prototype.checkFaceType = function ( faceType ) {
-			if ( this.rawMesh.faceType !== faceType ) {
-
-				this.processCompletedMesh();
-				this.rawMesh.faceType = faceType;
-				this.checkSubGroup();
-
-			}
-		};
-
-		Parser.prototype.checkSubGroup = function () {
-			var index = this.rawMesh.activeMtlName + '|' + this.rawMesh.smoothingGroup.normalized;
-			this.rawMesh.subGroupInUse = this.rawMesh.subGroups[ index ];
-
-			if ( ! THREE.LoaderSupport.Validator.isValid( this.rawMesh.subGroupInUse ) ) {
-
-				this.rawMesh.subGroupInUse = {
-					index: index,
-					objectName: this.rawMesh.objectName,
-					groupName: this.rawMesh.groupName,
-					materialName: this.rawMesh.activeMtlName,
-					smoothingGroup: this.rawMesh.smoothingGroup.normalized,
-					vertices: [],
-					indexMappingsCount: 0,
-					indexMappings: [],
-					indices: [],
-					colors: [],
-					uvs: [],
-					normals: []
-				};
-				this.rawMesh.subGroups[ index ] = this.rawMesh.subGroupInUse;
-
-			}
-		};
-
-		Parser.prototype.buildFace = function ( faceIndexV, faceIndexU, faceIndexN ) {
-			if ( this.disregardNormals ) faceIndexN = undefined;
-			var scope = this;
-			var updateSubGroupInUse = function () {
-
-				var faceIndexVi = parseInt( faceIndexV );
-				var indexPointerV = 3 * ( faceIndexVi > 0 ? faceIndexVi - 1 : faceIndexVi + scope.vertices.length / 3 );
-
-				var vertices = scope.rawMesh.subGroupInUse.vertices;
-				vertices.push( scope.vertices[ indexPointerV++ ] );
-				vertices.push( scope.vertices[ indexPointerV++ ] );
-				vertices.push( scope.vertices[ indexPointerV ] );
-
-				var indexPointerC = scope.colors.length > 0 ? indexPointerV + 1 : null;
-				if ( indexPointerC !== null ) {
-
-					var colors = scope.rawMesh.subGroupInUse.colors;
-					colors.push( scope.colors[ indexPointerC++ ] );
-					colors.push( scope.colors[ indexPointerC++ ] );
-					colors.push( scope.colors[ indexPointerC ] );
-
-				}
-				if ( faceIndexU ) {
-
-					var faceIndexUi = parseInt( faceIndexU );
-					var indexPointerU = 2 * ( faceIndexUi > 0 ? faceIndexUi - 1 : faceIndexUi + scope.uvs.length / 2 );
-					var uvs = scope.rawMesh.subGroupInUse.uvs;
-					uvs.push( scope.uvs[ indexPointerU++ ] );
-					uvs.push( scope.uvs[ indexPointerU ] );
-
-				}
-				if ( faceIndexN ) {
-
-					var faceIndexNi = parseInt( faceIndexN );
-					var indexPointerN = 3 * ( faceIndexNi > 0 ? faceIndexNi - 1 : faceIndexNi + scope.normals.length / 3 );
-					var normals = scope.rawMesh.subGroupInUse.normals;
-					normals.push( scope.normals[ indexPointerN++ ] );
-					normals.push( scope.normals[ indexPointerN++ ] );
-					normals.push( scope.normals[ indexPointerN ] );
-
-				}
-			};
-
-			if ( this.useIndices ) {
-
-				var mappingName = faceIndexV + ( faceIndexU ? '_' + faceIndexU : '_n' ) + ( faceIndexN ? '_' + faceIndexN : '_n' );
-				var indicesPointer = this.rawMesh.subGroupInUse.indexMappings[ mappingName ];
-				if ( THREE.LoaderSupport.Validator.isValid( indicesPointer ) ) {
-
-					this.rawMesh.counts.doubleIndicesCount++;
-
-				} else {
-
-					indicesPointer = this.rawMesh.subGroupInUse.vertices.length / 3;
-					updateSubGroupInUse();
-					this.rawMesh.subGroupInUse.indexMappings[ mappingName ] = indicesPointer;
-					this.rawMesh.subGroupInUse.indexMappingsCount++;
-
-				}
-				this.rawMesh.subGroupInUse.indices.push( indicesPointer );
-
-			} else {
-
-				updateSubGroupInUse();
-
-			}
-			this.rawMesh.counts.faceCount++;
-		};
-
-		Parser.prototype.createRawMeshReport = function ( inputObjectCount ) {
-			return 'Input Object number: ' + inputObjectCount +
-				'\n\tObject name: ' + this.rawMesh.objectName +
-				'\n\tGroup name: ' + this.rawMesh.groupName +
-				'\n\tMtllib name: ' + this.rawMesh.mtllibName +
-				'\n\tVertex count: ' + this.vertices.length / 3 +
-				'\n\tNormal count: ' + this.normals.length / 3 +
-				'\n\tUV count: ' + this.uvs.length / 2 +
-				'\n\tSmoothingGroup count: ' + this.rawMesh.counts.smoothingGroupCount +
-				'\n\tMaterial count: ' + this.rawMesh.counts.mtlCount +
-				'\n\tReal MeshOutputGroup count: ' + this.rawMesh.subGroups.length;
-		};
-
-		/**
-		 * Clear any empty subGroup and calculate absolute vertex, normal and uv counts
-		 */
-		Parser.prototype.finalizeRawMesh = function () {
-			var meshOutputGroupTemp = [];
-			var meshOutputGroup;
-			var absoluteVertexCount = 0;
-			var absoluteIndexMappingsCount = 0;
-			var absoluteIndexCount = 0;
-			var absoluteColorCount = 0;
-			var absoluteNormalCount = 0;
-			var absoluteUvCount = 0;
-			var indices;
-			for ( var name in this.rawMesh.subGroups ) {
-
-				meshOutputGroup = this.rawMesh.subGroups[ name ];
-				if ( meshOutputGroup.vertices.length > 0 ) {
-
-					indices = meshOutputGroup.indices;
-					if ( indices.length > 0 && absoluteIndexMappingsCount > 0 ) {
-
-						for ( var i in indices ) indices[ i ] = indices[ i ] + absoluteIndexMappingsCount;
-
-					}
-					meshOutputGroupTemp.push( meshOutputGroup );
-					absoluteVertexCount += meshOutputGroup.vertices.length;
-					absoluteIndexMappingsCount += meshOutputGroup.indexMappingsCount;
-					absoluteIndexCount += meshOutputGroup.indices.length;
-					absoluteColorCount += meshOutputGroup.colors.length;
-					absoluteUvCount += meshOutputGroup.uvs.length;
-					absoluteNormalCount += meshOutputGroup.normals.length;
-
-				}
-			}
-
-			// do not continue if no result
-			var result = null;
-			if ( meshOutputGroupTemp.length > 0 ) {
-
-				result = {
-					name: this.rawMesh.groupName !== '' ? this.rawMesh.groupName : this.rawMesh.objectName,
-					subGroups: meshOutputGroupTemp,
-					absoluteVertexCount: absoluteVertexCount,
-					absoluteIndexCount: absoluteIndexCount,
-					absoluteColorCount: absoluteColorCount,
-					absoluteNormalCount: absoluteNormalCount,
-					absoluteUvCount: absoluteUvCount,
-					faceCount: this.rawMesh.counts.faceCount,
-					doubleIndicesCount: this.rawMesh.counts.doubleIndicesCount
-				};
-
-			}
-			return result;
-		};
-
-		Parser.prototype.processCompletedMesh = function () {
-			var result = this.finalizeRawMesh();
-			if ( THREE.LoaderSupport.Validator.isValid( result ) ) {
-
-				if ( this.colors.length > 0 && this.colors.length !== this.vertices.length ) {
-
-					this._throwError( 'Vertex Colors were detected, but vertex count and color count do not match!' );
-
-				}
-				if ( this.logging.enabled && this.logging.debug ) console.debug( this.createRawMeshReport( this.inputObjectCount ) );
-				this.inputObjectCount++;
-
-				this.buildMesh( result );
-				var progressBytesPercent = this.globalCounts.currentByte / this.globalCounts.totalBytes;
-				this.callbackProgress( 'Completed [o: ' + this.rawMesh.objectName + ' g:' + this.rawMesh.groupName + '] Total progress: ' + ( progressBytesPercent * 100 ).toFixed( 2 ) + '%', progressBytesPercent );
-				this.resetRawMesh();
-				return true;
-
-			} else {
-
-				return false;
-			}
-		};
-
-		/**
-		 * SubGroups are transformed to too intermediate format that is forwarded to the MeshBuilder.
-		 * It is ensured that SubGroups only contain objects with vertices (no need to check).
-		 *
-		 * @param result
-		 */
-		Parser.prototype.buildMesh = function ( result ) {
-			var meshOutputGroups = result.subGroups;
-
-			var vertexFA = new Float32Array( result.absoluteVertexCount );
-			this.globalCounts.vertices += result.absoluteVertexCount / 3;
-			this.globalCounts.faces += result.faceCount;
-			this.globalCounts.doubleIndicesCount += result.doubleIndicesCount;
-			var indexUA = ( result.absoluteIndexCount > 0 ) ? new Uint32Array( result.absoluteIndexCount ) : null;
-			var colorFA = ( result.absoluteColorCount > 0 ) ? new Float32Array( result.absoluteColorCount ) : null;
-			var normalFA = ( result.absoluteNormalCount > 0 ) ? new Float32Array( result.absoluteNormalCount ) : null;
-			var uvFA = ( result.absoluteUvCount > 0 ) ? new Float32Array( result.absoluteUvCount ) : null;
-			var haveVertexColors = THREE.LoaderSupport.Validator.isValid( colorFA );
-
-			var meshOutputGroup;
-			var materialNames = [];
-
-			var createMultiMaterial = ( meshOutputGroups.length > 1 );
-			var materialIndex = 0;
-			var materialIndexMapping = [];
-			var selectedMaterialIndex;
-			var materialGroup;
-			var materialGroups = [];
-
-			var vertexFAOffset = 0;
-			var indexUAOffset = 0;
-			var colorFAOffset = 0;
-			var normalFAOffset = 0;
-			var uvFAOffset = 0;
-			var materialGroupOffset = 0;
-			var materialGroupLength = 0;
-
-			var materialOrg, material, materialName, materialNameOrg;
-			// only one specific face type
-			for ( var oodIndex in meshOutputGroups ) {
-
-				if ( ! meshOutputGroups.hasOwnProperty( oodIndex ) ) continue;
-				meshOutputGroup = meshOutputGroups[ oodIndex ];
-
-				materialNameOrg = meshOutputGroup.materialName;
-				if ( this.rawMesh.faceType < 4 ) {
-
-					materialName = materialNameOrg + ( haveVertexColors ? '_vertexColor' : '' ) + ( meshOutputGroup.smoothingGroup === 0 ? '_flat' : '' );
-
-
-				} else {
-
-					materialName = this.rawMesh.faceType === 6 ? 'defaultPointMaterial' : 'defaultLineMaterial';
-
-				}
-				materialOrg = this.materials[ materialNameOrg ];
-				material = this.materials[ materialName ];
-
-				// both original and derived names do not lead to an existing material => need to use a default material
-				if ( ! THREE.LoaderSupport.Validator.isValid( materialOrg ) && ! THREE.LoaderSupport.Validator.isValid( material ) ) {
-
-					var defaultMaterialName = haveVertexColors ? 'defaultVertexColorMaterial' : 'defaultMaterial';
-					materialOrg = this.materials[ defaultMaterialName ];
-					if ( this.logging.enabled ) console.warn( 'object_group "' + meshOutputGroup.objectName + '_' +
-						meshOutputGroup.groupName + '" was defined with unresolvable material "' +
-						materialNameOrg + '"! Assigning "' + defaultMaterialName + '".' );
-					materialNameOrg = defaultMaterialName;
-
-					// if names are identical then there is no need for later manipulation
-					if ( materialNameOrg === materialName ) {
-
-						material = materialOrg;
-						materialName = defaultMaterialName;
-
-					}
-
-				}
-				if ( ! THREE.LoaderSupport.Validator.isValid( material ) ) {
-
-					var materialCloneInstructions = {
-						materialNameOrg: materialNameOrg,
-						materialName: materialName,
-						materialProperties: {
-							vertexColors: haveVertexColors ? 2 : 0,
-							flatShading: meshOutputGroup.smoothingGroup === 0
-						}
-					};
-					var payload = {
-						cmd: 'materialData',
-						materials: {
-							materialCloneInstructions: materialCloneInstructions
-						}
-					};
-					this.callbackMeshBuilder( payload );
-
-					// fake entry for async; sync Parser always works on material references (Builder update directly visible here)
-					if ( this.useAsync ) this.materials[ materialName ] = materialCloneInstructions;
-
-				}
-
-				if ( createMultiMaterial ) {
-
-					// re-use material if already used before. Reduces materials array size and eliminates duplicates
-					selectedMaterialIndex = materialIndexMapping[ materialName ];
-					if ( ! selectedMaterialIndex ) {
-
-						selectedMaterialIndex = materialIndex;
-						materialIndexMapping[ materialName ] = materialIndex;
-						materialNames.push( materialName );
-						materialIndex++;
-
-					}
-					materialGroupLength = this.useIndices ? meshOutputGroup.indices.length : meshOutputGroup.vertices.length / 3;
-					materialGroup = {
-						start: materialGroupOffset,
-						count: materialGroupLength,
-						index: selectedMaterialIndex
-					};
-					materialGroups.push( materialGroup );
-					materialGroupOffset += materialGroupLength;
-
-				} else {
-
-					materialNames.push( materialName );
-
-				}
-
-				vertexFA.set( meshOutputGroup.vertices, vertexFAOffset );
-				vertexFAOffset += meshOutputGroup.vertices.length;
-
-				if ( indexUA ) {
-
-					indexUA.set( meshOutputGroup.indices, indexUAOffset );
-					indexUAOffset += meshOutputGroup.indices.length;
-
-				}
-
-				if ( colorFA ) {
-
-					colorFA.set( meshOutputGroup.colors, colorFAOffset );
-					colorFAOffset += meshOutputGroup.colors.length;
-
-				}
-
-				if ( normalFA ) {
-
-					normalFA.set( meshOutputGroup.normals, normalFAOffset );
-					normalFAOffset += meshOutputGroup.normals.length;
-
-				}
-				if ( uvFA ) {
-
-					uvFA.set( meshOutputGroup.uvs, uvFAOffset );
-					uvFAOffset += meshOutputGroup.uvs.length;
-
-				}
-
-				if ( this.logging.enabled && this.logging.debug ) {
-					var materialIndexLine = THREE.LoaderSupport.Validator.isValid( selectedMaterialIndex ) ? '\n\t\tmaterialIndex: ' + selectedMaterialIndex : '';
-					var createdReport = '\tOutput Object no.: ' + this.outputObjectCount +
-						'\n\t\tgroupName: ' + meshOutputGroup.groupName +
-						'\n\t\tIndex: ' + meshOutputGroup.index +
-						'\n\t\tfaceType: ' + this.rawMesh.faceType +
-						'\n\t\tmaterialName: ' + meshOutputGroup.materialName +
-						'\n\t\tsmoothingGroup: ' + meshOutputGroup.smoothingGroup +
-						materialIndexLine +
-						'\n\t\tobjectName: ' + meshOutputGroup.objectName +
-						'\n\t\t#vertices: ' + meshOutputGroup.vertices.length / 3 +
-						'\n\t\t#indices: ' + meshOutputGroup.indices.length +
-						'\n\t\t#colors: ' + meshOutputGroup.colors.length / 3 +
-						'\n\t\t#uvs: ' + meshOutputGroup.uvs.length / 2 +
-						'\n\t\t#normals: ' + meshOutputGroup.normals.length / 3;
-					console.debug( createdReport );
-				}
-
-			}
-
-			this.outputObjectCount++;
-			this.callbackMeshBuilder(
-				{
-					cmd: 'meshData',
-					progress: {
-						numericalValue: this.globalCounts.currentByte / this.globalCounts.totalBytes
-					},
-					params: {
-						meshName: result.name
-					},
-					materials: {
-						multiMaterial: createMultiMaterial,
-						materialNames: materialNames,
-						materialGroups: materialGroups
-					},
-					buffers: {
-						vertices: vertexFA,
-						indices: indexUA,
-						colors: colorFA,
-						normals: normalFA,
-						uvs: uvFA
-					},
-					// 0: mesh, 1: line, 2: point
-					geometryType: this.rawMesh.faceType < 4 ? 0 : ( this.rawMesh.faceType === 6 ) ? 2 : 1
-				},
-				[ vertexFA.buffer ],
-				THREE.LoaderSupport.Validator.isValid( indexUA ) ? [ indexUA.buffer ] : null,
-				THREE.LoaderSupport.Validator.isValid( colorFA ) ? [ colorFA.buffer ] : null,
-				THREE.LoaderSupport.Validator.isValid( normalFA ) ? [ normalFA.buffer ] : null,
-				THREE.LoaderSupport.Validator.isValid( uvFA ) ? [ uvFA.buffer ] : null
-			);
-		};
-
-		Parser.prototype.finalizeParsing = function () {
-			if ( this.logging.enabled ) console.info( 'Global output object count: ' + this.outputObjectCount );
-			if ( this.processCompletedMesh() && this.logging.enabled ) {
-
-				var parserFinalReport = 'Overall counts: ' +
-					'\n\tVertices: ' + this.globalCounts.vertices +
-					'\n\tFaces: ' + this.globalCounts.faces +
-					'\n\tMultiple definitions: ' + this.globalCounts.doubleIndicesCount;
-				console.info( parserFinalReport );
-
-			}
-		};
-
-		return Parser;
-	})();
-
-	/**
-	 * Utility method for loading an mtl file according resource description. Provide url or content.
-	 * @memberOf THREE.OBJLoader2
-	 *
-	 * @param {string} url URL to the file
-	 * @param {Object} content The file content as arraybuffer or text
-	 * @param {function} onLoad Callback to be called after successful load
-	 * @param {callback} [onProgress] A function to be called while the loading is in progress. The argument will be the XMLHttpRequest instance, which contains total and Integer bytes.
-	 * @param {callback} [onError] A function to be called if an error occurs during loading. The function receives the error as an argument.
-	 * @param {string} [crossOrigin] CORS value
- 	 * @param {Object} [materialOptions] Set material loading options for MTLLoader
-	 */
-	OBJLoader2.prototype.loadMtl = function ( url, content, onLoad, onProgress, onError, crossOrigin, materialOptions ) {
-		var resource = new THREE.LoaderSupport.ResourceDescriptor( url, 'MTL' );
-		resource.setContent( content );
-		this._loadMtl( resource, onLoad, onProgress, onError, crossOrigin, materialOptions );
-	};
-
-
-	OBJLoader2.prototype._loadMtl = function ( resource, onLoad, onProgress, onError, crossOrigin, materialOptions ) {
-		if ( THREE.MTLLoader === undefined ) console.error( '"THREE.MTLLoader" is not available. "THREE.OBJLoader2" requires it for loading MTL files.' );
-		if ( Validator.isValid( resource ) && this.logging.enabled ) console.time( 'Loading MTL: ' + resource.name );
-
-		var materials = [];
-		var scope = this;
-		var processMaterials = function ( materialCreator ) {
-			var materialCreatorMaterials = [];
-			if ( Validator.isValid( materialCreator ) ) {
-
-				materialCreator.preload();
-				materialCreatorMaterials = materialCreator.materials;
-				for ( var materialName in materialCreatorMaterials ) {
-
-					if ( materialCreatorMaterials.hasOwnProperty( materialName ) ) {
-
-						materials[ materialName ] = materialCreatorMaterials[ materialName ];
-
-					}
-				}
-			}
-
-			if ( Validator.isValid( resource ) && scope.logging.enabled ) console.timeEnd( 'Loading MTL: ' + resource.name );
-			onLoad( materials, materialCreator );
-		};
-
-		// fast-fail
-		if ( ! Validator.isValid( resource ) || ( ! Validator.isValid( resource.content ) && ! Validator.isValid( resource.url ) ) ) {
-
-			processMaterials();
-
-		} else {
-
-			var mtlLoader = new THREE.MTLLoader( this.manager );
-			crossOrigin = Validator.verifyInput( crossOrigin, 'anonymous' );
-			mtlLoader.setCrossOrigin( crossOrigin );
-			mtlLoader.setResourcePath( resource.path );
-			if ( Validator.isValid( materialOptions ) ) mtlLoader.setMaterialOptions( materialOptions );
-
-			var parseTextWithMtlLoader = function ( content ) {
-				var contentAsText = content;
-				if ( typeof( content ) !== 'string' && ! ( content instanceof String ) ) {
-
-					if ( content.length > 0 || content.byteLength > 0 ) {
-
-						contentAsText = THREE.LoaderUtils.decodeText( content );
-
-					} else {
-
-						this._throwError( 'Unable to parse mtl as it it seems to be neither a String, an Array or an ArrayBuffer!' );
-					}
-
-				}
-				processMaterials( mtlLoader.parse( contentAsText ) );
-			};
-
-			if ( Validator.isValid( resource.content ) ) {
-
-				parseTextWithMtlLoader( resource.content );
-
-			} else if ( Validator.isValid( resource.url ) ) {
-
-				var fileLoader = new THREE.FileLoader( this.manager );
-				if ( ! Validator.isValid( onError ) ) {
-					onError = function ( event ) {
-						scope._onError( event );
-					};
-				}
-				if ( ! Validator.isValid( onProgress ) ) {
-					var numericalValueRef = 0;
-					var numericalValue = 0;
-					onProgress = function ( event ) {
-						if ( ! event.lengthComputable ) return;
-
-						numericalValue = event.loaded / event.total;
-						if ( numericalValue > numericalValueRef ) {
-
-							numericalValueRef = numericalValue;
-							var output = 'Download of "' + resource.url + '": ' + ( numericalValue * 100 ).toFixed( 2 ) + '%';
-							scope.onProgress( 'progressLoad', output, numericalValue );
-
-						}
-					};
-				}
-
-				fileLoader.load( resource.url, parseTextWithMtlLoader, onProgress, onError );
-
-			}
-		}
-	};
-
-	return OBJLoader2;
-})();
-
- return THREE.OBJLoader2;
-});
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-define('OBJLoader',["three", "vendor/three/loaders/OBJLoader2", "lodash"], function( THREE, OBJLoader2, _ ){
-    var OBJLoader = function ( manager, logger )
-    { 
-        OBJLoader2.call( this, manager, logger );
-    };
-
-    OBJLoader.prototype = _.create( OBJLoader2.prototype, {
-        constructor : OBJLoader,
-        
-        load : function(url, onLoad, onProgress, onError)
-        {
-            onLoad = onLoad || function(){};
-            if( url === null || url === undefined || url === "" ) {
-                onLoad( null );
-            };
-            var scope = this;
-
-            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
-
-            require(["text!" + url], function ( responseText ) {
-                var fnc = onLoad || function(){};
-                fnc ( scope.parse( responseText, path ) );
-            }, onError);
-        }
-        
-    });
-
-    return OBJLoader;
-});
-
-
-define('vendor/three/loaders/MTLLoader',["three"], function(THREE){
-/**
- * Loads a Wavefront .mtl file specifying materials
- *
- * @author angelxuanchang
- */
-
-THREE.MTLLoader = function ( manager ) {
-
-	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
-
-};
-
-THREE.MTLLoader.prototype = {
-
-	constructor: THREE.MTLLoader,
-
-	/**
-	 * Loads and parses a MTL asset from a URL.
-	 *
-	 * @param {String} url - URL to the MTL file.
-	 * @param {Function} [onLoad] - Callback invoked with the loaded object.
-	 * @param {Function} [onProgress] - Callback for download progress.
-	 * @param {Function} [onError] - Callback for download errors.
-	 *
-	 * @see setPath setResourcePath
-	 *
-	 * @note In order for relative texture references to resolve correctly
-	 * you must call setResourcePath() explicitly prior to load.
-	 */
-	load: function ( url, onLoad, onProgress, onError ) {
-
-		var scope = this;
-
-		var path = ( this.path === undefined ) ? THREE.LoaderUtils.extractUrlBase( url ) : this.path;
-
-		var loader = new THREE.FileLoader( this.manager );
-		loader.setPath( this.path );
-		loader.load( url, function ( text ) {
-
-			onLoad( scope.parse( text, path ) );
-
-		}, onProgress, onError );
-
-	},
-
-	/**
-	 * Set base path for resolving references.
-	 * If set this path will be prepended to each loaded and found reference.
-	 *
-	 * @see setResourcePath
-	 * @param {String} path
-	 * @return {THREE.MTLLoader}
-	 *
-	 * @example
-	 *     mtlLoader.setPath( 'assets/obj/' );
-	 *     mtlLoader.load( 'my.mtl', ... );
-	 */
-	setPath: function ( path ) {
-
-		this.path = path;
-		return this;
-
-	},
-
-	/**
-	 * Set base path for additional resources like textures.
-	 *
-	 * @see setPath
-	 * @param {String} path
-	 * @return {THREE.MTLLoader}
-	 *
-	 * @example
-	 *     mtlLoader.setPath( 'assets/obj/' );
-	 *     mtlLoader.setResourcePath( 'assets/textures/' );
-	 *     mtlLoader.load( 'my.mtl', ... );
-	 */
-	setResourcePath: function ( path ) {
-
-		this.resourcePath = path;
-		return this;
-
-	},
-
-	setTexturePath: function ( path ) {
-
-		console.warn( 'THREE.MTLLoader: .setTexturePath() has been renamed to .setResourcePath().' );
-		return this.setResourcePath( path );
-
-	},
-
-	setCrossOrigin: function ( value ) {
-
-		this.crossOrigin = value;
-		return this;
-
-	},
-
-	setMaterialOptions: function ( value ) {
-
-		this.materialOptions = value;
-		return this;
-
-	},
-
-	/**
-	 * Parses a MTL file.
-	 *
-	 * @param {String} text - Content of MTL file
-	 * @return {THREE.MTLLoader.MaterialCreator}
-	 *
-	 * @see setPath setResourcePath
-	 *
-	 * @note In order for relative texture references to resolve correctly
-	 * you must call setResourcePath() explicitly prior to parse.
-	 */
-	parse: function ( text, path ) {
-
-		var lines = text.split( '\n' );
-		var info = {};
-		var delimiter_pattern = /\s+/;
-		var materialsInfo = {};
-
-		for ( var i = 0; i < lines.length; i ++ ) {
-
-			var line = lines[ i ];
-			line = line.trim();
-
-			if ( line.length === 0 || line.charAt( 0 ) === '#' ) {
-
-				// Blank line or comment ignore
-				continue;
-
-			}
-
-			var pos = line.indexOf( ' ' );
-
-			var key = ( pos >= 0 ) ? line.substring( 0, pos ) : line;
-			key = key.toLowerCase();
-
-			var value = ( pos >= 0 ) ? line.substring( pos + 1 ) : '';
-			value = value.trim();
-
-			if ( key === 'newmtl' ) {
-
-				// New material
-
-				info = { name: value };
-				materialsInfo[ value ] = info;
-
-			} else {
-
-				if ( key === 'ka' || key === 'kd' || key === 'ks' ) {
-
-					var ss = value.split( delimiter_pattern, 3 );
-					info[ key ] = [ parseFloat( ss[ 0 ] ), parseFloat( ss[ 1 ] ), parseFloat( ss[ 2 ] ) ];
-
-				} else {
-
-					info[ key ] = value;
-
-				}
-
-			}
-
-		}
-
-		var materialCreator = new THREE.MTLLoader.MaterialCreator( this.resourcePath || path, this.materialOptions );
-		materialCreator.setCrossOrigin( this.crossOrigin );
-		materialCreator.setManager( this.manager );
-		materialCreator.setMaterials( materialsInfo );
-		return materialCreator;
-
-	}
-
-};
-
-/**
- * Create a new THREE-MTLLoader.MaterialCreator
- * @param baseUrl - Url relative to which textures are loaded
- * @param options - Set of options on how to construct the materials
- *                  side: Which side to apply the material
- *                        THREE.FrontSide (default), THREE.BackSide, THREE.DoubleSide
- *                  wrap: What type of wrapping to apply for textures
- *                        THREE.RepeatWrapping (default), THREE.ClampToEdgeWrapping, THREE.MirroredRepeatWrapping
- *                  normalizeRGB: RGBs need to be normalized to 0-1 from 0-255
- *                                Default: false, assumed to be already normalized
- *                  ignoreZeroRGBs: Ignore values of RGBs (Ka,Kd,Ks) that are all 0's
- *                                  Default: false
- * @constructor
- */
-
-THREE.MTLLoader.MaterialCreator = function ( baseUrl, options ) {
-
-	this.baseUrl = baseUrl || '';
-	this.options = options;
-	this.materialsInfo = {};
-	this.materials = {};
-	this.materialsArray = [];
-	this.nameLookup = {};
-
-	this.side = ( this.options && this.options.side ) ? this.options.side : THREE.FrontSide;
-	this.wrap = ( this.options && this.options.wrap ) ? this.options.wrap : THREE.RepeatWrapping;
-
-};
-
-THREE.MTLLoader.MaterialCreator.prototype = {
-
-	constructor: THREE.MTLLoader.MaterialCreator,
-
-	crossOrigin: 'anonymous',
-
-	setCrossOrigin: function ( value ) {
-
-		this.crossOrigin = value;
-		return this;
-
-	},
-
-	setManager: function ( value ) {
-
-		this.manager = value;
-
-	},
-
-	setMaterials: function ( materialsInfo ) {
-
-		this.materialsInfo = this.convert( materialsInfo );
-		this.materials = {};
-		this.materialsArray = [];
-		this.nameLookup = {};
-
-	},
-
-	convert: function ( materialsInfo ) {
-
-		if ( ! this.options ) return materialsInfo;
-
-		var converted = {};
-
-		for ( var mn in materialsInfo ) {
-
-			// Convert materials info into normalized form based on options
-
-			var mat = materialsInfo[ mn ];
-
-			var covmat = {};
-
-			converted[ mn ] = covmat;
-
-			for ( var prop in mat ) {
-
-				var save = true;
-				var value = mat[ prop ];
-				var lprop = prop.toLowerCase();
-
-				switch ( lprop ) {
-
-					case 'kd':
-					case 'ka':
-					case 'ks':
-
-						// Diffuse color (color under white light) using RGB values
-
-						if ( this.options && this.options.normalizeRGB ) {
-
-							value = [ value[ 0 ] / 255, value[ 1 ] / 255, value[ 2 ] / 255 ];
-
-						}
-
-						if ( this.options && this.options.ignoreZeroRGBs ) {
-
-							if ( value[ 0 ] === 0 && value[ 1 ] === 0 && value[ 2 ] === 0 ) {
-
-								// ignore
-
-								save = false;
-
-							}
-
-						}
-
-						break;
-
-					default:
-
-						break;
-
-				}
-
-				if ( save ) {
-
-					covmat[ lprop ] = value;
-
-				}
-
-			}
-
-		}
-
-		return converted;
-
-	},
-
-	preload: function () {
-
-		for ( var mn in this.materialsInfo ) {
-
-			this.create( mn );
-
-		}
-
-	},
-
-	getIndex: function ( materialName ) {
-
-		return this.nameLookup[ materialName ];
-
-	},
-
-	getAsArray: function () {
-
-		var index = 0;
-
-		for ( var mn in this.materialsInfo ) {
-
-			this.materialsArray[ index ] = this.create( mn );
-			this.nameLookup[ mn ] = index;
-			index ++;
-
-		}
-
-		return this.materialsArray;
-
-	},
-
-	create: function ( materialName ) {
-
-		if ( this.materials[ materialName ] === undefined ) {
-
-			this.createMaterial_( materialName );
-
-		}
-
-		return this.materials[ materialName ];
-
-	},
-
-	createMaterial_: function ( materialName ) {
-
-		// Create material
-
-		var scope = this;
-		var mat = this.materialsInfo[ materialName ];
-		var params = {
-
-			name: materialName,
-			side: this.side
-
-		};
-
-		function resolveURL( baseUrl, url ) {
-
-			if ( typeof url !== 'string' || url === '' )
-				return '';
-
-			// Absolute URL
-			if ( /^https?:\/\//i.test( url ) ) return url;
-
-			return baseUrl + url;
-
-		}
-
-		function setMapForType( mapType, value ) {
-
-			if ( params[ mapType ] ) return; // Keep the first encountered texture
-
-			var texParams = scope.getTextureParams( value, params );
-			var map = scope.loadTexture( resolveURL( scope.baseUrl, texParams.url ) );
-
-			map.repeat.copy( texParams.scale );
-			map.offset.copy( texParams.offset );
-
-			map.wrapS = scope.wrap;
-			map.wrapT = scope.wrap;
-
-			params[ mapType ] = map;
-
-		}
-
-		for ( var prop in mat ) {
-
-			var value = mat[ prop ];
-			var n;
-
-			if ( value === '' ) continue;
-
-			switch ( prop.toLowerCase() ) {
-
-				// Ns is material specular exponent
-
-				case 'kd':
-
-					// Diffuse color (color under white light) using RGB values
-
-					params.color = new THREE.Color().fromArray( value );
-
-					break;
-
-				case 'ks':
-
-					// Specular color (color when light is reflected from shiny surface) using RGB values
-					params.specular = new THREE.Color().fromArray( value );
-
-					break;
-
-				case 'map_kd':
-
-					// Diffuse texture map
-
-					setMapForType( "map", value );
-
-					break;
-
-				case 'map_ks':
-
-					// Specular map
-
-					setMapForType( "specularMap", value );
-
-					break;
-
-				case 'norm':
-
-					setMapForType( "normalMap", value );
-
-					break;
-
-				case 'map_bump':
-				case 'bump':
-
-					// Bump texture map
-
-					setMapForType( "bumpMap", value );
-
-					break;
-
-				case 'map_d':
-
-					// Alpha map
-
-					setMapForType( "alphaMap", value );
-					params.transparent = true;
-
-					break;
-
-				case 'ns':
-
-					// The specular exponent (defines the focus of the specular highlight)
-					// A high exponent results in a tight, concentrated highlight. Ns values normally range from 0 to 1000.
-
-					params.shininess = parseFloat( value );
-
-					break;
-
-				case 'd':
-					n = parseFloat( value );
-
-					if ( n < 1 ) {
-
-						params.opacity = n;
-						params.transparent = true;
-
-					}
-
-					break;
-
-				case 'tr':
-					n = parseFloat( value );
-
-					if ( this.options && this.options.invertTrProperty ) n = 1 - n;
-
-					if ( n > 0 ) {
-
-						params.opacity = 1 - n;
-						params.transparent = true;
-
-					}
-
-					break;
-
-				default:
-					break;
-
-			}
-
-		}
-
-		this.materials[ materialName ] = new THREE.MeshPhongMaterial( params );
-		return this.materials[ materialName ];
-
-	},
-
-	getTextureParams: function ( value, matParams ) {
-
-		var texParams = {
-
-			scale: new THREE.Vector2( 1, 1 ),
-			offset: new THREE.Vector2( 0, 0 )
-
-		 };
-
-		var items = value.split( /\s+/ );
-		var pos;
-
-		pos = items.indexOf( '-bm' );
-
-		if ( pos >= 0 ) {
-
-			matParams.bumpScale = parseFloat( items[ pos + 1 ] );
-			items.splice( pos, 2 );
-
-		}
-
-		pos = items.indexOf( '-s' );
-
-		if ( pos >= 0 ) {
-
-			texParams.scale.set( parseFloat( items[ pos + 1 ] ), parseFloat( items[ pos + 2 ] ) );
-			items.splice( pos, 4 ); // we expect 3 parameters here!
-
-		}
-
-		pos = items.indexOf( '-o' );
-
-		if ( pos >= 0 ) {
-
-			texParams.offset.set( parseFloat( items[ pos + 1 ] ), parseFloat( items[ pos + 2 ] ) );
-			items.splice( pos, 4 ); // we expect 3 parameters here!
-
-		}
-
-		texParams.url = items.join( ' ' ).trim();
-		return texParams;
-
-	},
-
-	loadTexture: function ( url, mapping, onLoad, onProgress, onError ) {
-
-		var texture;
-		var loader = THREE.Loader.Handlers.get( url );
-		var manager = ( this.manager !== undefined ) ? this.manager : THREE.DefaultLoadingManager;
-
-		if ( loader === null ) {
-
-			loader = new THREE.TextureLoader( manager );
-
-		}
-
-		if ( loader.setCrossOrigin ) loader.setCrossOrigin( this.crossOrigin );
-		texture = loader.load( url, onLoad, onProgress, onError );
-
-		if ( mapping !== undefined ) texture.mapping = mapping;
-
-		return texture;
-
-	}
-
-};
-
- return THREE.MTLLoader;
-});
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-define('MTLLoader',["three", "vendor/three/loaders/MTLLoader", "lodash"], function( THREE, ThreeMTLLoader, _ ){
-    var MTLLoader = function ( manager, logger )
-    { 
-        ThreeMTLLoader.call( this, manager, logger );
-    };
-
-    MTLLoader.prototype = _.create( ThreeMTLLoader.prototype, {
-        constructor : MTLLoader,
-        
-        load : function(url, onLoad, onProgress, onError)
-        {
-            onLoad = onLoad || function(){};
-            if( url === null || url === undefined || url === "" ) {
-                onLoad( null );
-            };
-            var scope = this;
-
-            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
-
-            require(["text!" + url], function ( responseText ) {
-                var fnc = onLoad || function(){};
-                fnc ( scope.parse( responseText, path ) );
-            }, onError);
-        }
-        
-    });
-
-    return MTLLoader;
-});
-
-
-define('vendor/three/loaders/STLLoader',["three"], function(THREE){
-/**
- * @author aleeper / http://adamleeper.com/
- * @author mrdoob / http://mrdoob.com/
- * @author gero3 / https://github.com/gero3
- * @author Mugen87 / https://github.com/Mugen87
- *
- * Description: A THREE loader for STL ASCII files, as created by Solidworks and other CAD programs.
- *
- * Supports both binary and ASCII encoded files, with automatic detection of type.
- *
- * The loader returns a non-indexed buffer geometry.
- *
- * Limitations:
- *  Binary decoding supports "Magics" color format (http://en.wikipedia.org/wiki/STL_(file_format)#Color_in_binary_STL).
- *  There is perhaps some question as to how valid it is to always assume little-endian-ness.
- *  ASCII decoding assumes file is UTF-8.
- *
- * Usage:
- *  var loader = new THREE.STLLoader();
- *  loader.load( './models/stl/slotted_disk.stl', function ( geometry ) {
- *    scene.add( new THREE.Mesh( geometry ) );
- *  });
- *
- * For binary STLs geometry might contain colors for vertices. To use it:
- *  // use the same code to load STL as above
- *  if (geometry.hasColors) {
- *    material = new THREE.MeshPhongMaterial({ opacity: geometry.alpha, vertexColors: THREE.VertexColors });
- *  } else { .... }
- *  var mesh = new THREE.Mesh( geometry, material );
- */
-
-
-THREE.STLLoader = function ( manager ) {
-
-	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
-
-};
-
-THREE.STLLoader.prototype = {
-
-	constructor: THREE.STLLoader,
-
-	load: function ( url, onLoad, onProgress, onError ) {
-
-		var scope = this;
-
-		var loader = new THREE.FileLoader( scope.manager );
-		loader.setPath( scope.path );
-		loader.setResponseType( 'arraybuffer' );
-		loader.load( url, function ( text ) {
-
-			try {
-
-				onLoad( scope.parse( text ) );
-
-			} catch ( exception ) {
-
-				if ( onError ) {
-
-					onError( exception );
-
-				}
-
-			}
-
-		}, onProgress, onError );
-
-	},
-
-	setPath: function ( value ) {
-
-		this.path = value;
-		return this;
-
-	},
-
-	parse: function ( data ) {
-
-		function isBinary( data ) {
-
-			var expect, face_size, n_faces, reader;
-			reader = new DataView( data );
-			face_size = ( 32 / 8 * 3 ) + ( ( 32 / 8 * 3 ) * 3 ) + ( 16 / 8 );
-			n_faces = reader.getUint32( 80, true );
-			expect = 80 + ( 32 / 8 ) + ( n_faces * face_size );
-
-			if ( expect === reader.byteLength ) {
-
-				return true;
-
-			}
-
-			// An ASCII STL data must begin with 'solid ' as the first six bytes.
-			// However, ASCII STLs lacking the SPACE after the 'd' are known to be
-			// plentiful.  So, check the first 5 bytes for 'solid'.
-
-			// Several encodings, such as UTF-8, precede the text with up to 5 bytes:
-			// https://en.wikipedia.org/wiki/Byte_order_mark#Byte_order_marks_by_encoding
-			// Search for "solid" to start anywhere after those prefixes.
-
-			// US-ASCII ordinal values for 's', 'o', 'l', 'i', 'd'
-
-			var solid = [ 115, 111, 108, 105, 100 ];
-
-			for ( var off = 0; off < 5; off ++ ) {
-
-				// If "solid" text is matched to the current offset, declare it to be an ASCII STL.
-
-				if ( matchDataViewAt ( solid, reader, off ) ) return false;
-
-			}
-
-			// Couldn't find "solid" text at the beginning; it is binary STL.
-
-			return true;
-
-		}
-
-		function matchDataViewAt( query, reader, offset ) {
-
-			// Check if each byte in query matches the corresponding byte from the current offset
-
-			for ( var i = 0, il = query.length; i < il; i ++ ) {
-
-				if ( query[ i ] !== reader.getUint8( offset + i, false ) ) return false;
-
-			}
-
-			return true;
-
-		}
-
-		function parseBinary( data ) {
-
-			var reader = new DataView( data );
-			var faces = reader.getUint32( 80, true );
-
-			var r, g, b, hasColors = false, colors;
-			var defaultR, defaultG, defaultB, alpha;
-
-			// process STL header
-			// check for default color in header ("COLOR=rgba" sequence).
-
-			for ( var index = 0; index < 80 - 10; index ++ ) {
-
-				if ( ( reader.getUint32( index, false ) == 0x434F4C4F /*COLO*/ ) &&
-					( reader.getUint8( index + 4 ) == 0x52 /*'R'*/ ) &&
-					( reader.getUint8( index + 5 ) == 0x3D /*'='*/ ) ) {
-
-					hasColors = true;
-					colors = [];
-
-					defaultR = reader.getUint8( index + 6 ) / 255;
-					defaultG = reader.getUint8( index + 7 ) / 255;
-					defaultB = reader.getUint8( index + 8 ) / 255;
-					alpha = reader.getUint8( index + 9 ) / 255;
-
-				}
-
-			}
-
-			var dataOffset = 84;
-			var faceLength = 12 * 4 + 2;
-
-			var geometry = new THREE.BufferGeometry();
-
-			var vertices = [];
-			var normals = [];
-
-			for ( var face = 0; face < faces; face ++ ) {
-
-				var start = dataOffset + face * faceLength;
-				var normalX = reader.getFloat32( start, true );
-				var normalY = reader.getFloat32( start + 4, true );
-				var normalZ = reader.getFloat32( start + 8, true );
-
-				if ( hasColors ) {
-
-					var packedColor = reader.getUint16( start + 48, true );
-
-					if ( ( packedColor & 0x8000 ) === 0 ) {
-
-						// facet has its own unique color
-
-						r = ( packedColor & 0x1F ) / 31;
-						g = ( ( packedColor >> 5 ) & 0x1F ) / 31;
-						b = ( ( packedColor >> 10 ) & 0x1F ) / 31;
-
-					} else {
-
-						r = defaultR;
-						g = defaultG;
-						b = defaultB;
-
-					}
-
-				}
-
-				for ( var i = 1; i <= 3; i ++ ) {
-
-					var vertexstart = start + i * 12;
-
-					vertices.push( reader.getFloat32( vertexstart, true ) );
-					vertices.push( reader.getFloat32( vertexstart + 4, true ) );
-					vertices.push( reader.getFloat32( vertexstart + 8, true ) );
-
-					normals.push( normalX, normalY, normalZ );
-
-					if ( hasColors ) {
-
-						colors.push( r, g, b );
-
-					}
-
-				}
-
-			}
-
-			geometry.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( vertices ), 3 ) );
-			geometry.addAttribute( 'normal', new THREE.BufferAttribute( new Float32Array( normals ), 3 ) );
-
-			if ( hasColors ) {
-
-				geometry.addAttribute( 'color', new THREE.BufferAttribute( new Float32Array( colors ), 3 ) );
-				geometry.hasColors = true;
-				geometry.alpha = alpha;
-
-			}
-
-			return geometry;
-
-		}
-
-		function parseASCII( data ) {
-
-			var geometry = new THREE.BufferGeometry();
-			var patternFace = /facet([\s\S]*?)endfacet/g;
-			var faceCounter = 0;
-
-			var patternFloat = /[\s]+([+-]?(?:\d*)(?:\.\d*)?(?:[eE][+-]?\d+)?)/.source;
-			var patternVertex = new RegExp( 'vertex' + patternFloat + patternFloat + patternFloat, 'g' );
-			var patternNormal = new RegExp( 'normal' + patternFloat + patternFloat + patternFloat, 'g' );
-
-			var vertices = [];
-			var normals = [];
-
-			var normal = new THREE.Vector3();
-
-			var result;
-
-			while ( ( result = patternFace.exec( data ) ) !== null ) {
-
-				var vertexCountPerFace = 0;
-				var normalCountPerFace = 0;
-
-				var text = result[ 0 ];
-
-				while ( ( result = patternNormal.exec( text ) ) !== null ) {
-
-					normal.x = parseFloat( result[ 1 ] );
-					normal.y = parseFloat( result[ 2 ] );
-					normal.z = parseFloat( result[ 3 ] );
-					normalCountPerFace ++;
-
-				}
-
-				while ( ( result = patternVertex.exec( text ) ) !== null ) {
-
-					vertices.push( parseFloat( result[ 1 ] ), parseFloat( result[ 2 ] ), parseFloat( result[ 3 ] ) );
-					normals.push( normal.x, normal.y, normal.z );
-					vertexCountPerFace ++;
-
-				}
-
-				// every face have to own ONE valid normal
-
-				if ( normalCountPerFace !== 1 ) {
-
-					console.error( 'THREE.STLLoader: Something isn\'t right with the normal of face number ' + faceCounter );
-
-				}
-
-				// each face have to own THREE valid vertices
-
-				if ( vertexCountPerFace !== 3 ) {
-
-					console.error( 'THREE.STLLoader: Something isn\'t right with the vertices of face number ' + faceCounter );
-
-				}
-
-				faceCounter ++;
-
-			}
-
-			geometry.addAttribute( 'position', new THREE.Float32BufferAttribute( vertices, 3 ) );
-			geometry.addAttribute( 'normal', new THREE.Float32BufferAttribute( normals, 3 ) );
-
-			return geometry;
-
-		}
-
-		function ensureString( buffer ) {
-
-			if ( typeof buffer !== 'string' ) {
-
-				return THREE.LoaderUtils.decodeText( new Uint8Array( buffer ) );
-
-			}
-
-			return buffer;
-
-		}
-
-		function ensureBinary( buffer ) {
-
-			if ( typeof buffer === 'string' ) {
-
-				var array_buffer = new Uint8Array( buffer.length );
-				for ( var i = 0; i < buffer.length; i ++ ) {
-
-					array_buffer[ i ] = buffer.charCodeAt( i ) & 0xff; // implicitly assumes little-endian
-
-				}
-				return array_buffer.buffer || array_buffer;
-
-			} else {
-
-				return buffer;
-
-			}
-
-		}
-
-		// start
-
-		var binData = ensureBinary( data );
-
-		return isBinary( binData ) ? parseBinary( binData ) : parseASCII( ensureString( data ) );
-
-	}
-
-};
-
- return THREE.STLLoader;
-});
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-define('STLLoader',["three", "vendor/three/loaders/STLLoader", "lodash"], function( THREE, ThreeSTLLoader, _ ){
-    var STLLoader = function ( manager, logger )
-    { 
-        ThreeSTLLoader.call( this, manager, logger );
-    };
-
-    STLLoader.prototype = _.create( ThreeSTLLoader.prototype, {
-        constructor : STLLoader,
-        
-        load : function(url, onLoad, onProgress, onError)
-        {
-            onLoad = onLoad || function(){};
-            if( url === null || url === undefined || url === "" ) {
-                onLoad( null );
-            };
-            var scope = this;
-
-            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
-
-            require(["text!" + url], function ( responseText ) {
-                var fnc = onLoad || function(){};
-                try{
-                    fnc ( scope.parse( responseText, path ) );
-                }
-                catch( e ){
-                    onError ( e );
-                }
-                
-            }, onError);
-        }
-        
-    });
-
-    return STLLoader;
-});
-
-
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-define('UniversalLoader',["three", "STLLoader", "ColladaLoader", "OBJLoader", "MTLLoader"], function( THREE, STLLoader, ColladaLoader, OBJLoader, MTLLoader ) {
-
-    var UniversalLoader = function(){
-        
-    };
-
-    UniversalLoader.prototype.load = function( urls, onLoad, onError ){
-	
-        // handle arguments polymorphism
-	if( typeof(urls) === 'string' )	urls	= [urls];
-
-	// load stl
-	if( urls[0].match(/\.stl$/i) && urls.length === 1 ){
-		this.loader	= new STLLoader();
-		this.loader.addEventListener('load', function( event ){
-			var geometry	= event.content;
-			var material	= new THREE.MeshPhongMaterial();
-			var object3d	= new THREE.Mesh( geometry, material );
-			onLoad(object3d);
-		});
-		this.loader.load(urls[0]);
-                
-		return;
-                
-	}else if( urls[0].match(/\.dae$/i) && urls.length === 1 ){
-		this.loader = new ColladaLoader();
-		this.loader.options.convertUpAxis = true;
-		this.loader.load(urls[0], function( collada ){
-                    // console.dir(arguments)
-                    var object3d = collada.scene;
-                    onLoad( object3d );
-		}, null, onError);
-		return;
-                
-	}else if( urls[0].match(/\.js$/i) && urls.length === 1 ){
-		this.loader = new THREE.JSONLoader();
-		this.loader.load(urls[0], function(geometry, materials){
-			if( materials.length > 1 ){
-				var material	= new THREE.MeshFaceMaterial(materials);
-			}else{
-				var material	= materials[0];
-			}
-			var object3d	= new THREE.Mesh(geometry, material);
-			onLoad(object3d);
-		});
-		return;
-                
-	}else if( urls[0].match(/\.obj$/i) && urls.length === 1 ){
-		this.loader = new OBJLoader();
-		this.loader.load(urls[0], function(object3d){
-			onLoad(object3d);
-		});
-		return;
-        }else if( urls[0].match(/\.mtl$/i) && urls.length === 1 ){
-		this.loader	= new MTLLoader();
-		this.loader.load(urls[1], urls[0], function( material ){
-			onLoad( material );
-		});
-		return;
-                        
-	}else if( urls.length === 2 && urls[0].match(/\.mtl$/i) && urls[1].match(/\.obj$/i) ){
-            _loadOBJMTL( [urls[1], urls[0]], onLoad, onError );
-            return;
-                
-	}else if( urls.length === 2 && urls[0].match(/\.obj$/i) && urls[1].match(/\.mtl$/i) ){
-            _loadOBJMTL( urls, onLoad, onError );
-            return;
-                
-	}else	console.assert( false );
-    };
-    
-    var _loadOBJMTL = function( urls, onLoad, onError ){
-        
-        var mtlLoader = new MTLLoader();
-            //mtlLoader.setPath( 'models/obj/male02/' );
-        
-        mtlLoader.load( urls[1], function( materials ) {
-            materials.preload();
-            var objLoader = new OBJLoader();
-            objLoader.setMaterials( materials );
-            //objLoader.setPath( 'models/obj/male02/' );
-            objLoader.load( urls[0], function ( object3d ) {
-
-                onLoad( object3d );
-            }, null, onError );
-        });
-        
-    };
-    
-    return UniversalLoader;
-});
-
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-define('ObjectDAE',["three", "lodash", "ColladaLoader"], function( THREE, _, ColladaLoader )
-{
-    var defaults = {
-        shadow : false,
-        scale : 39.37,
-        onLoad : function(){}
-    };
-
-    var enableShadow = function( dae )
-    {
-        dae.traverse( function ( child ) {
-            if ( child instanceof THREE.Mesh ) {
-                child.castShadow = true;
-                child.receiveShadow = true;
-            }
-        });
-    };
-    var setName = function( dae )
-    {
-        var counter = 0;
-        dae.traverse( function ( child ) {
-            if ( child instanceof THREE.Mesh ) {
-                child.name = dae.name + counter;
-                counter++;
-            }
-        });
-    };
-
-    var counterClockwiseFaceOrder = function( dae )
-    {
-        dae.traverse( function ( el ) {
-            if ( el instanceof THREE.Mesh ) {
-                _.each( el.geometry.faces, function( face ){
-                    var temp = face.a;
-                    face.a = face.c;
-                    face.c = temp;
-                });
-            }
-        });
-
-    };
-
-    var ObjectDAE = function( file, opt )
-    {
-        var loader = new ColladaLoader();
-        loader.options.convertUpAxis = true;
-
-        this.options = _.extend( {}, defaults, opt );
-
-        THREE.Object3D.call( this );
-
-        this.registerEvents();
-
-        loader.load( file, function( collada )
-        {
-            var dae = collada.scene;
-            dae.name = this.options.name || file;
-            setName(dae);
-            if ( this.options.shadow ) enableShadow( dae );
-
-            var scaleX = (this.options.mirror)? -this.options.scale : this.options.scale;
-            dae.scale.set( scaleX, this.options.scale, this.options.scale );
-
-            if( this.options.mirror ) counterClockwiseFaceOrder( dae );
-
-            this.add( dae );
-            this.options.onLoad( this, dae );
-        }.bind(this) );
-    };
-
-    //inherits from THREE.Object3D
-    ObjectDAE.prototype = Object.create( THREE.Object3D.prototype );
-    ObjectDAE.prototype.constructor = ObjectDAE;
-    
-    ObjectDAE.prototype.registerEvents = function(){
-        
-    };
-    
-    return ObjectDAE;
-});
-
-
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-define('threeVP-Loaders',["ColladaLoader", "OBJLoader", "MTLLoader", "UniversalLoader", "ObjectDAE"], function( ColladaLoader, OBJLoader, MTLLoader, UniversalLoader, ObjectDAE ){
-    return {
-        ColladaLoader   : ColladaLoader,
-        OBJLoader       : OBJLoader,
-        MTLLoader       : MTLLoader,
-        UniversalLoader : UniversalLoader,
-        ObjectDAE       : ObjectDAE
-    };
-});
-
-
-/**
- * Created by bernie on 05.12.15.
- */
-define('Draggable',["lodash", "cmd"], function ( _, CMD )
-{
-    var events = ["mousedown", "mouseup"];
-    
-    var mouseDown = function( ev ){ 
-        CMD.trigger("startTracking", ev); 
-    };
-    var mouseUp = function( ev ){ 
-        CMD.trigger("stopTracking", ev); 
-    };
-    
-    
-    var Draggable = {
-        
-        DomEvents : null,
-        
-        userEvents : events,
-        
-        init : function( VP ){
-            this.DomEvents = VP.DomEvents;
-        },
-        
-        makeDraggable : function( el, opt ) {
-            if ( this.DomEvents === null ) {
-                console.log( "Draggable.VP is null, you must set aktive VP" );
-                return;
-            }
-            var scope = el || this;
-            
-            el.track = function( pos ){
-                //scope.position.addVectors( pos );
-                //console.log( pos );
-                scope.position.x = pos.x;
-                scope.position.z = pos.z;
-            };
-            
-            this.DomEvents.addEventListener( scope, events[0], mouseDown );
-            this.DomEvents.addEventListener( scope, events[1], mouseUp );
-        },
-
-        onMouseDown : CMD.startTracking
-    };
-
-    return Draggable;
-});
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-define('Interactive',["three", "lodash"], function( THREE, _ ){
-    
-    var events = ["mousedown", "mouseup", "click"];
-    
-    var Interactive = {
-        
-        DomEvents : null,
-        
-        init : function( VP ){
-            this.DomEvents = VP.DomEvents;
-        },
-        
-        makeInteractive : function( el ) {
-            var _eventsMap = {
-                mousedown : el._onMousedown,
-                mouseup : el._onMouseup,
-                dblclick : el._onDblclick,
-                click : el._onClick
-            };
-            var scope = this;
-            
-            
-            scope.DomEvents.on( el, "click", this.onClick );
-            _.each( events, function( ev ){
-                scope.DomEvents.addEventListener( el, ev, el._eventsMap[ev] );
-            });
-            this.DomActive = true;
-        },
-        
-        onClick : function(){},
-        onMousedown : function(){}
-    };
-    
-    return Interactive;
-});
-
-/**
- * Created by bernie on 08.11.15.
- */
-define('utilities/IntersectPlane',["three", "lodash"], function ( THREE, _ ) {
-    
-    var pointer_position = new THREE.Vector3( 0,0,0 );
-    
-    var options = {
-         width      : 100, 
-         height     : 100,
-         opacity    : 0.0,
-         dir        : "xz"
-    };
-
-    var IPlane = function( VP, opt )
-    {
-        var scope = this;
-        
-        this.options = {};
-        _.extend( this.options, options, opt );
-
-        this.camera = VP.camera;
-        this.enabled = false;
-        this.visible = false;
-        
-        var side = /*this.options.opacity < .01 ? THREE.BackSide :*/ THREE.FrontSide;
-
-        THREE.Mesh.call( this,
-            new THREE.PlaneGeometry( this.options.width, this.options.height ),
-            new THREE.MeshBasicMaterial({ opacity: this.options.opacity, transparent: true, side : side })
-        );
-
-        this._handleMouseMove = function(){ scope.handleMouseMove.apply(scope, arguments); };
-
-        this.DomEvents = VP.DomEvents;
-
-        if (this.options.dir === "xz") this.rotation.x = Math.PI * -.5;
-        if (this.options.dir === "yz") this.rotation.y = Math.PI * -.5;
-    };
-
-    IPlane.prototype = _.create( THREE.Mesh.prototype, {
-        constructor : IPlane,
-
-        startTracking : function( mouse_position ){
-            this.enabled = true;
-            this.DomEvents.addEventListener( this, 'mousemove', this._handleMouseMove );
-            this.position.set( mouse_position.x, mouse_position.y, mouse_position.z );
-        },
-
-        handleMouseMove : function( ev )
-        {
-            if ( this.enabled )
-            {
-                pointer_position.copy( ev.intersect.point );
-                this.dispatchEvent({ type: "tracking", origDomEvent : ev, pointer_position : pointer_position });
-                this.position.copy( pointer_position );
-            }
-        },
-        
-        stopTracking : function() 
-        {
-            if ( this.enabled )
-            {
-                this.enabled = false;
-                this.DomEvents.removeEventListener( this, 'mousemove', this._handleMouseMove );
-                this.position.y = -10;
-            }
-        }
-    });
-
-    return IPlane;
-});
-/**
- * Created by bernie on 01.11.15.
- */
-define('plugins/plg.Tracking',["plugin", "three", "cmd", "utilities/IntersectPlane"], function( Plugin, THREE, CMD, IntersectPlane )
-{
-    var selected_block; 
-    var intersect_plane;
-    var mouse_position= new THREE.Vector3(0, 0, 0), 
-        block_offset = new THREE.Vector3(0, 0, 0),
-        track = new THREE.Vector3(0, 0, 0);
-
-    var Tracking = function( opt )
-    {
-        Plugin.call( this, opt );
-    };
-    
-    Tracking.prototype = Object.create( Plugin.prototype );
-    Tracking.prototype.constructor = Tracking;
-    //Tracking.prototype.super = Plugin.prototype;
-    
-    Tracking.prototype.registerEvents = function()
-    {
-        CMD.on( "viewportInitalized", function( VP )
-        {    
-            intersect_plane = new IntersectPlane( VP );
-            VP.scene.add( intersect_plane );    
-            
-            intersect_plane.addEventListener( "tracking", this.onTrack );
-            VP.DomEvents.addEventListener( VP.scene, "mouseup", this.stopTracking );
-        }, this );
-
-        CMD.on( "startTracking", this.startTracking, this );
-        CMD.on( "stopTracking", this.stopTracking, this );
-    };
-    
-    Tracking.prototype.removeEvents = function(){
-        CMD.off( "startTracking", this.startTracking );
-        CMD.off( "stopTracking", this.stopTracking);
-    };
-    
-    Tracking.prototype.startTracking = function( ev )
-    {
-        CMD.VP.trigger( "disableControl" );
-
-        ev.stopPropagation();
-        
-        selected_block = ev.target;
-
-        mouse_position.copy( ev.intersect.point );
-        block_offset.subVectors( selected_block.position, mouse_position );
-        block_offset.y = selected_block.position.y;
-
-        intersect_plane.startTracking( mouse_position );
-    };
-    
-    Tracking.prototype.stopTracking = function()
-    {
-        CMD.VP.trigger( "enableControl" );
-        intersect_plane.stopTracking();
-
-        if ( selected_block !== null ) {
-            selected_block = null;
-            intersect_plane.position.y = 0;
-        }
-    };
-
-    Tracking.prototype.onTrack = function( evt )
-    {
-        var ev = evt.origDomEvent;
-        ev.stopPropagation();
-       
-        if ( selected_block !== null && intersect_plane === evt.target) {
-
-            mouse_position.copy( ev.intersect.point );
-            
-            //set position
-            selected_block.track( track.addVectors( mouse_position, block_offset) );
-        }
-    };
-
-    return Tracking;
-});
-
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-define('plugins/plg.Draggable',["plugin", "Draggable", "cmd"], function( Plugin, Draggable, CMD ){
-    var PlgDraggable = function(){
-        this.super.constructor.call( this );
-    };
-    
-    PlgDraggable.prototype = Object.create( Plugin.prototype );
-    PlgDraggable.prototype.constructor = PlgDraggable;
-    Draggable.prototype.super = Plugin.prototype;
-    
-    PlgDraggable.prototype.registerEvents = function()
-    {
-        CMD.Scene.on("added", function( el ){
-            if ( el.userData && el.userData.draggable === true ) {
-                Draggable.makeDraggable( el );
-            }
-        });
-    };
-    
-    return PlgDraggable;
-});
-
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-define('threeVP-Interactive',["Draggable", "Interactive", "plugins/plg.Tracking", "plugins/plg.Draggable"], function( Draggable, Interactive, PlgTracking, PlgDraggable ){
-    return {
-        Draggable       : Draggable,
-        Interactive     : Interactive,
-        PlgTracking     : PlgTracking,
-        PlgDraggable    : PlgDraggable
-    };
-});
-
 
 
 
@@ -99324,6 +98916,8277 @@ define('pack-shaders',["shaders/FXAAShader", "shaders/SSAOShader", "shaders/Copy
 });
 
 
+/**
+ * Created by bernie on 05.12.15.
+ */
+define('Draggable',["lodash", "cmd"], function ( _, CMD )
+{
+    var events = ["mousedown", "mouseup"];
+    
+    var mouseDown = function( ev ){ 
+        CMD.trigger("startTracking", ev); 
+    };
+    var mouseUp = function( ev ){ 
+        CMD.trigger("stopTracking", ev); 
+    };
+    
+    
+    var Draggable = {
+        
+        DomEvents : null,
+        
+        userEvents : events,
+        
+        init : function( VP ){
+            this.DomEvents = VP.DomEvents;
+        },
+        
+        makeDraggable : function( el, opt ) {
+            if ( this.DomEvents === null ) {
+                console.log( "Draggable.VP is null, you must set aktive VP" );
+                return;
+            }
+            var scope = el || this;
+            
+            el.track = function( pos ){
+                //scope.position.addVectors( pos );
+                //console.log( pos );
+                scope.position.x = pos.x;
+                scope.position.z = pos.z;
+            };
+            
+            this.DomEvents.addEventListener( scope, events[0], mouseDown );
+            this.DomEvents.addEventListener( scope, events[1], mouseUp );
+        },
+
+        onMouseDown : CMD.startTracking
+    };
+
+    return Draggable;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('Interactive',["three", "lodash"], function( THREE, _ ){
+    
+    var events = ["mousedown", "mouseup", "click"];
+    
+    var Interactive = {
+        
+        DomEvents : null,
+        
+        init : function( VP ){
+            this.DomEvents = VP.DomEvents;
+        },
+        
+        makeInteractive : function( el ) {
+            var _eventsMap = {
+                mousedown : el._onMousedown,
+                mouseup : el._onMouseup,
+                dblclick : el._onDblclick,
+                click : el._onClick
+            };
+            var scope = this;
+            
+            
+            scope.DomEvents.on( el, "click", this.onClick );
+            _.each( events, function( ev ){
+                scope.DomEvents.addEventListener( el, ev, el._eventsMap[ev] );
+            });
+            this.DomActive = true;
+        },
+        
+        onClick : function(){},
+        onMousedown : function(){}
+    };
+    
+    return Interactive;
+});
+
+/**
+ * Created by bernie on 08.11.15.
+ */
+define('utilities/IntersectPlane',["three", "lodash"], function ( THREE, _ ) {
+    
+    var pointer_position = new THREE.Vector3( 0,0,0 );
+    
+    var options = {
+         width      : 100, 
+         height     : 100,
+         opacity    : 0.0,
+         dir        : "xz"
+    };
+
+    var IPlane = function( VP, opt )
+    {
+        var scope = this;
+        
+        this.options = {};
+        _.extend( this.options, options, opt );
+
+        this.camera = VP.camera;
+        this.enabled = false;
+        this.visible = false;
+        
+        var side = /*this.options.opacity < .01 ? THREE.BackSide :*/ THREE.FrontSide;
+
+        THREE.Mesh.call( this,
+            new THREE.PlaneGeometry( this.options.width, this.options.height ),
+            new THREE.MeshBasicMaterial({ opacity: this.options.opacity, transparent: true, side : side })
+        );
+
+        this._handleMouseMove = function(){ scope.handleMouseMove.apply(scope, arguments); };
+
+        this.DomEvents = VP.DomEvents;
+
+        if (this.options.dir === "xz") this.rotation.x = Math.PI * -.5;
+        if (this.options.dir === "yz") this.rotation.y = Math.PI * -.5;
+    };
+
+    IPlane.prototype = _.create( THREE.Mesh.prototype, {
+        constructor : IPlane,
+
+        startTracking : function( mouse_position ){
+            this.enabled = true;
+            this.DomEvents.addEventListener( this, 'mousemove', this._handleMouseMove );
+            this.position.set( mouse_position.x, mouse_position.y, mouse_position.z );
+        },
+
+        handleMouseMove : function( ev )
+        {
+            if ( this.enabled )
+            {
+                pointer_position.copy( ev.intersect.point );
+                this.dispatchEvent({ type: "tracking", origDomEvent : ev, pointer_position : pointer_position });
+                this.position.copy( pointer_position );
+            }
+        },
+        
+        stopTracking : function() 
+        {
+            if ( this.enabled )
+            {
+                this.enabled = false;
+                this.DomEvents.removeEventListener( this, 'mousemove', this._handleMouseMove );
+                this.position.y = -10;
+            }
+        }
+    });
+
+    return IPlane;
+});
+/**
+ * Created by bernie on 01.11.15.
+ */
+define('plugins/plg.Tracking',["plugin", "three", "cmd", "utilities/IntersectPlane"], function( Plugin, THREE, CMD, IntersectPlane )
+{
+    var selected_block; 
+    var intersect_plane;
+    var mouse_position= new THREE.Vector3(0, 0, 0), 
+        block_offset = new THREE.Vector3(0, 0, 0),
+        track = new THREE.Vector3(0, 0, 0);
+
+    var Tracking = function( opt )
+    {
+        Plugin.call( this, opt );
+    };
+    
+    Tracking.prototype = Object.create( Plugin.prototype );
+    Tracking.prototype.constructor = Tracking;
+    //Tracking.prototype.super = Plugin.prototype;
+    
+    Tracking.prototype.registerEvents = function()
+    {
+        CMD.on( "viewportInitalized", function( VP )
+        {    
+            intersect_plane = new IntersectPlane( VP );
+            VP.scene.add( intersect_plane );    
+            
+            intersect_plane.addEventListener( "tracking", this.onTrack );
+            VP.DomEvents.addEventListener( VP.scene, "mouseup", this.stopTracking );
+        }, this );
+
+        CMD.on( "startTracking", this.startTracking, this );
+        CMD.on( "stopTracking", this.stopTracking, this );
+    };
+    
+    Tracking.prototype.removeEvents = function(){
+        CMD.off( "startTracking", this.startTracking );
+        CMD.off( "stopTracking", this.stopTracking);
+    };
+    
+    Tracking.prototype.startTracking = function( ev )
+    {
+        CMD.VP.trigger( "disableControl" );
+
+        ev.stopPropagation();
+        
+        selected_block = ev.target;
+
+        mouse_position.copy( ev.intersect.point );
+        block_offset.subVectors( selected_block.position, mouse_position );
+        block_offset.y = selected_block.position.y;
+
+        intersect_plane.startTracking( mouse_position );
+    };
+    
+    Tracking.prototype.stopTracking = function()
+    {
+        CMD.VP.trigger( "enableControl" );
+        intersect_plane.stopTracking();
+
+        if ( selected_block !== null ) {
+            selected_block = null;
+            intersect_plane.position.y = 0;
+        }
+    };
+
+    Tracking.prototype.onTrack = function( evt )
+    {
+        var ev = evt.origDomEvent;
+        ev.stopPropagation();
+       
+        if ( selected_block !== null && intersect_plane === evt.target) {
+
+            mouse_position.copy( ev.intersect.point );
+            
+            //set position
+            selected_block.track( track.addVectors( mouse_position, block_offset) );
+        }
+    };
+
+    return Tracking;
+});
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('plugins/plg.Draggable',["plugin", "Draggable", "cmd"], function( Plugin, Draggable, CMD ){
+    var PlgDraggable = function(){
+        this.super.constructor.call( this );
+    };
+    
+    PlgDraggable.prototype = Object.create( Plugin.prototype );
+    PlgDraggable.prototype.constructor = PlgDraggable;
+    Draggable.prototype.super = Plugin.prototype;
+    
+    PlgDraggable.prototype.registerEvents = function()
+    {
+        CMD.Scene.on("added", function( el ){
+            if ( el.userData && el.userData.draggable === true ) {
+                Draggable.makeDraggable( el );
+            }
+        });
+    };
+    
+    return PlgDraggable;
+});
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('pack-Interactive',["Draggable", "Interactive", "plugins/plg.Tracking", "plugins/plg.Draggable"], function( Draggable, Interactive, PlgTracking, PlgDraggable ){
+    return {
+        Draggable       : Draggable,
+        Interactive     : Interactive,
+        PlgTracking     : PlgTracking,
+        PlgDraggable    : PlgDraggable
+    };
+});
+define('vendor/three/loaders/ColladaLoader',["three"], function(THREE){
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author Mugen87 / https://github.com/Mugen87
+ */
+
+THREE.ColladaLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.ColladaLoader.prototype = {
+
+	constructor: THREE.ColladaLoader,
+
+	crossOrigin: 'Anonymous',
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
+
+		var loader = new THREE.FileLoader( scope.manager );
+		loader.load( url, function ( text ) {
+
+			onLoad( scope.parse( text, path ) );
+
+		}, onProgress, onError );
+
+	},
+
+	setPath: function ( value ) {
+
+		this.path = value;
+
+	},
+
+	options: {
+
+		set convertUpAxis( value ) {
+
+			console.warn( 'THREE.ColladaLoader: options.convertUpAxis() has been removed. Up axis is converted automatically.' );
+
+		}
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	},
+
+	parse: function ( text, path ) {
+
+		function getElementsByTagName( xml, name ) {
+
+			// Non recursive xml.getElementsByTagName() ...
+
+			var array = [];
+			var childNodes = xml.childNodes;
+
+			for ( var i = 0, l = childNodes.length; i < l; i ++ ) {
+
+				var child = childNodes[ i ];
+
+				if ( child.nodeName === name ) {
+
+					array.push( child );
+
+				}
+
+			}
+
+			return array;
+
+		}
+
+		function parseStrings( text ) {
+
+			if ( text.length === 0 ) return [];
+
+			var parts = text.trim().split( /\s+/ );
+			var array = new Array( parts.length );
+
+			for ( var i = 0, l = parts.length; i < l; i ++ ) {
+
+				array[ i ] = parts[ i ];
+
+			}
+
+			return array;
+
+		}
+
+		function parseFloats( text ) {
+
+			if ( text.length === 0 ) return [];
+
+			var parts = text.trim().split( /\s+/ );
+			var array = new Array( parts.length );
+
+			for ( var i = 0, l = parts.length; i < l; i ++ ) {
+
+				array[ i ] = parseFloat( parts[ i ] );
+
+			}
+
+			return array;
+
+		}
+
+		function parseInts( text ) {
+
+			if ( text.length === 0 ) return [];
+
+			var parts = text.trim().split( /\s+/ );
+			var array = new Array( parts.length );
+
+			for ( var i = 0, l = parts.length; i < l; i ++ ) {
+
+				array[ i ] = parseInt( parts[ i ] );
+
+			}
+
+			return array;
+
+		}
+
+		function parseId( text ) {
+
+			return text.substring( 1 );
+
+		}
+
+		function generateId() {
+
+			return 'three_default_' + ( count ++ );
+
+		}
+
+		function isEmpty( object ) {
+
+			return Object.keys( object ).length === 0;
+
+		}
+
+		// asset
+
+		function parseAsset( xml ) {
+
+			return {
+				unit: parseAssetUnit( getElementsByTagName( xml, 'unit' )[ 0 ] ),
+				upAxis: parseAssetUpAxis( getElementsByTagName( xml, 'up_axis' )[ 0 ] )
+			};
+
+		}
+
+		function parseAssetUnit( xml ) {
+
+			if ( ( xml !== undefined ) && ( xml.hasAttribute( 'meter' ) === true ) ) {
+
+				return parseFloat( xml.getAttribute( 'meter' ) );
+
+			} else {
+
+				return 1; // default 1 meter
+
+			}
+
+		}
+
+		function parseAssetUpAxis( xml ) {
+
+			return xml !== undefined ? xml.textContent : 'Y_UP';
+
+		}
+
+		// library
+
+		function parseLibrary( xml, libraryName, nodeName, parser ) {
+
+			var library = getElementsByTagName( xml, libraryName )[ 0 ];
+
+			if ( library !== undefined ) {
+
+				var elements = getElementsByTagName( library, nodeName );
+
+				for ( var i = 0; i < elements.length; i ++ ) {
+
+					parser( elements[ i ] );
+
+				}
+
+			}
+
+		}
+
+		function buildLibrary( data, builder ) {
+
+			for ( var name in data ) {
+
+				var object = data[ name ];
+				object.build = builder( data[ name ] );
+
+			}
+
+		}
+
+		// get
+
+		function getBuild( data, builder ) {
+
+			if ( data.build !== undefined ) return data.build;
+
+			data.build = builder( data );
+
+			return data.build;
+
+		}
+
+		// animation
+
+		function parseAnimation( xml ) {
+
+			var data = {
+				sources: {},
+				samplers: {},
+				channels: {}
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				var id;
+
+				switch ( child.nodeName ) {
+
+					case 'source':
+						id = child.getAttribute( 'id' );
+						data.sources[ id ] = parseSource( child );
+						break;
+
+					case 'sampler':
+						id = child.getAttribute( 'id' );
+						data.samplers[ id ] = parseAnimationSampler( child );
+						break;
+
+					case 'channel':
+						id = child.getAttribute( 'target' );
+						data.channels[ id ] = parseAnimationChannel( child );
+						break;
+
+					default:
+						console.log( child );
+
+				}
+
+			}
+
+			library.animations[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parseAnimationSampler( xml ) {
+
+			var data = {
+				inputs: {},
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'input':
+						var id = parseId( child.getAttribute( 'source' ) );
+						var semantic = child.getAttribute( 'semantic' );
+						data.inputs[ semantic ] = id;
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseAnimationChannel( xml ) {
+
+			var data = {};
+
+			var target = xml.getAttribute( 'target' );
+
+			// parsing SID Addressing Syntax
+
+			var parts = target.split( '/' );
+
+			var id = parts.shift();
+			var sid = parts.shift();
+
+			// check selection syntax
+
+			var arraySyntax = ( sid.indexOf( '(' ) !== - 1 );
+			var memberSyntax = ( sid.indexOf( '.' ) !== - 1 );
+
+			if ( memberSyntax ) {
+
+				//  member selection access
+
+				parts = sid.split( '.' );
+				sid = parts.shift();
+				data.member = parts.shift();
+
+			} else if ( arraySyntax ) {
+
+				// array-access syntax. can be used to express fields in one-dimensional vectors or two-dimensional matrices.
+
+				var indices = sid.split( '(' );
+				sid = indices.shift();
+
+				for ( var i = 0; i < indices.length; i ++ ) {
+
+					indices[ i ] = parseInt( indices[ i ].replace( /\)/, '' ) );
+
+				}
+
+				data.indices = indices;
+
+			}
+
+			data.id = id;
+			data.sid = sid;
+
+			data.arraySyntax = arraySyntax;
+			data.memberSyntax = memberSyntax;
+
+			data.sampler = parseId( xml.getAttribute( 'source' ) );
+
+			return data;
+
+		}
+
+		function buildAnimation( data ) {
+
+			var tracks = [];
+
+			var channels = data.channels;
+			var samplers = data.samplers;
+			var sources = data.sources;
+
+			for ( var target in channels ) {
+
+				if ( channels.hasOwnProperty( target ) ) {
+
+					var channel = channels[ target ];
+					var sampler = samplers[ channel.sampler ];
+
+					var inputId = sampler.inputs.INPUT;
+					var outputId = sampler.inputs.OUTPUT;
+
+					var inputSource = sources[ inputId ];
+					var outputSource = sources[ outputId ];
+
+					var animation = buildAnimationChannel( channel, inputSource, outputSource );
+
+					createKeyframeTracks( animation, tracks );
+
+				}
+
+			}
+
+			return tracks;
+
+		}
+
+		function getAnimation( id ) {
+
+			return getBuild( library.animations[ id ], buildAnimation );
+
+		}
+
+		function buildAnimationChannel( channel, inputSource, outputSource ) {
+
+			var node = library.nodes[ channel.id ];
+			var object3D = getNode( node.id );
+
+			var transform = node.transforms[ channel.sid ];
+			var defaultMatrix = node.matrix.clone().transpose();
+
+			var time, stride;
+			var i, il, j, jl;
+
+			var data = {};
+
+			// the collada spec allows the animation of data in various ways.
+			// depending on the transform type (matrix, translate, rotate, scale), we execute different logic
+
+			switch ( transform ) {
+
+				case 'matrix':
+
+					for ( i = 0, il = inputSource.array.length; i < il; i ++ ) {
+
+						time = inputSource.array[ i ];
+						stride = i * outputSource.stride;
+
+						if ( data[ time ] === undefined ) data[ time ] = {};
+
+						if ( channel.arraySyntax === true ) {
+
+							var value = outputSource.array[ stride ];
+							var index = channel.indices[ 0 ] + 4 * channel.indices[ 1 ];
+
+							data[ time ][ index ] = value;
+
+						} else {
+
+							for ( j = 0, jl = outputSource.stride; j < jl; j ++ ) {
+
+								data[ time ][ j ] = outputSource.array[ stride + j ];
+
+							}
+
+						}
+
+					}
+
+					break;
+
+				case 'translate':
+					console.warn( 'THREE.ColladaLoader: Animation transform type "%s" not yet implemented.', transform );
+					break;
+
+				case 'rotate':
+					console.warn( 'THREE.ColladaLoader: Animation transform type "%s" not yet implemented.', transform );
+					break;
+
+				case 'scale':
+					console.warn( 'THREE.ColladaLoader: Animation transform type "%s" not yet implemented.', transform );
+					break;
+
+			}
+
+			var keyframes = prepareAnimationData( data, defaultMatrix );
+
+			var animation = {
+				name: object3D.uuid,
+				keyframes: keyframes
+			};
+
+			return animation;
+
+		}
+
+		function prepareAnimationData( data, defaultMatrix ) {
+
+			var keyframes = [];
+
+			// transfer data into a sortable array
+
+			for ( var time in data ) {
+
+				keyframes.push( { time: parseFloat( time ), value: data[ time ] } );
+
+			}
+
+			// ensure keyframes are sorted by time
+
+			keyframes.sort( ascending );
+
+			// now we clean up all animation data, so we can use them for keyframe tracks
+
+			for ( var i = 0; i < 16; i ++ ) {
+
+				transformAnimationData( keyframes, i, defaultMatrix.elements[ i ] );
+
+			}
+
+			return keyframes;
+
+			// array sort function
+
+			function ascending( a, b ) {
+
+				return a.time - b.time;
+
+			}
+
+		}
+
+		var position = new THREE.Vector3();
+		var scale = new THREE.Vector3();
+		var quaternion = new THREE.Quaternion();
+
+		function createKeyframeTracks( animation, tracks ) {
+
+			var keyframes = animation.keyframes;
+			var name = animation.name;
+
+			var times = [];
+			var positionData = [];
+			var quaternionData = [];
+			var scaleData = [];
+
+			for ( var i = 0, l = keyframes.length; i < l; i ++ ) {
+
+				var keyframe = keyframes[ i ];
+
+				var time = keyframe.time;
+				var value = keyframe.value;
+
+				matrix.fromArray( value ).transpose();
+				matrix.decompose( position, quaternion, scale );
+
+				times.push( time );
+				positionData.push( position.x, position.y, position.z );
+				quaternionData.push( quaternion.x, quaternion.y, quaternion.z, quaternion.w );
+				scaleData.push( scale.x, scale.y, scale.z );
+
+			}
+
+			if ( positionData.length > 0 ) tracks.push( new THREE.VectorKeyframeTrack( name + '.position', times, positionData ) );
+			if ( quaternionData.length > 0 ) tracks.push( new THREE.QuaternionKeyframeTrack( name + '.quaternion', times, quaternionData ) );
+			if ( scaleData.length > 0 ) tracks.push( new THREE.VectorKeyframeTrack( name + '.scale', times, scaleData ) );
+
+			return tracks;
+
+		}
+
+		function transformAnimationData( keyframes, property, defaultValue ) {
+
+			var keyframe;
+
+			var empty = true;
+			var i, l;
+
+			// check, if values of a property are missing in our keyframes
+
+			for ( i = 0, l = keyframes.length; i < l; i ++ ) {
+
+				keyframe = keyframes[ i ];
+
+				if ( keyframe.value[ property ] === undefined ) {
+
+					keyframe.value[ property ] = null; // mark as missing
+
+				} else {
+
+					empty = false;
+
+				}
+
+			}
+
+			if ( empty === true ) {
+
+				// no values at all, so we set a default value
+
+				for ( i = 0, l = keyframes.length; i < l; i ++ ) {
+
+					keyframe = keyframes[ i ];
+
+					keyframe.value[ property ] = defaultValue;
+
+				}
+
+			} else {
+
+				// filling gaps
+
+				createMissingKeyframes( keyframes, property );
+
+			}
+
+		}
+
+		function createMissingKeyframes( keyframes, property ) {
+
+			var prev, next;
+
+			for ( var i = 0, l = keyframes.length; i < l; i ++ ) {
+
+				var keyframe = keyframes[ i ];
+
+				if ( keyframe.value[ property ] === null ) {
+
+					prev = getPrev( keyframes, i, property );
+					next = getNext( keyframes, i, property );
+
+					if ( prev === null ) {
+
+						keyframe.value[ property ] = next.value[ property ];
+						continue;
+
+					}
+
+					if ( next === null ) {
+
+						keyframe.value[ property ] = prev.value[ property ];
+						continue;
+
+					}
+
+					interpolate( keyframe, prev, next, property );
+
+				}
+
+			}
+
+		}
+
+		function getPrev( keyframes, i, property ) {
+
+			while ( i >= 0 ) {
+
+				var keyframe = keyframes[ i ];
+
+				if ( keyframe.value[ property ] !== null ) return keyframe;
+
+				i --;
+
+			}
+
+			return null;
+
+		}
+
+		function getNext( keyframes, i, property ) {
+
+			while ( i < keyframes.length ) {
+
+				var keyframe = keyframes[ i ];
+
+				if ( keyframe.value[ property ] !== null ) return keyframe;
+
+				i ++;
+
+			}
+
+			return null;
+
+		}
+
+		function interpolate( key, prev, next, property ) {
+
+			if ( ( next.time - prev.time ) === 0 ) {
+
+				key.value[ property ] = prev.value[ property ];
+				return;
+
+			}
+
+			key.value[ property ] = ( ( key.time - prev.time ) * ( next.value[ property ] - prev.value[ property ] ) / ( next.time - prev.time ) ) + prev.value[ property ];
+
+		}
+
+		// animation clips
+
+		function parseAnimationClip( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'id' ) || 'default',
+				start: parseFloat( xml.getAttribute( 'start' ) || 0 ),
+				end: parseFloat( xml.getAttribute( 'end' ) || 0 ),
+				animations: []
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'instance_animation':
+						data.animations.push( parseId( child.getAttribute( 'url' ) ) );
+						break;
+
+				}
+
+			}
+
+			library.clips[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function buildAnimationClip( data ) {
+
+			var tracks = [];
+
+			var name = data.name;
+			var duration = ( data.end - data.start ) || - 1;
+			var animations = data.animations;
+
+			for ( var i = 0, il = animations.length; i < il; i ++ ) {
+
+				var animationTracks = getAnimation( animations[ i ] );
+
+				for ( var j = 0, jl = animationTracks.length; j < jl; j ++ ) {
+
+					tracks.push( animationTracks[ j ] );
+
+				}
+
+			}
+
+			return new THREE.AnimationClip( name, duration, tracks );
+
+		}
+
+		function getAnimationClip( id ) {
+
+			return getBuild( library.clips[ id ], buildAnimationClip );
+
+		}
+
+		// controller
+
+		function parseController( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'skin':
+						// there is exactly one skin per controller
+						data.id = parseId( child.getAttribute( 'source' ) );
+						data.skin = parseSkin( child );
+						break;
+
+					case 'morph':
+						data.id = parseId( child.getAttribute( 'source' ) );
+						console.warn( 'THREE.ColladaLoader: Morph target animation not supported yet.' );
+						break;
+
+				}
+
+			}
+
+			library.controllers[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parseSkin( xml ) {
+
+			var data = {
+				sources: {}
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'bind_shape_matrix':
+						data.bindShapeMatrix = parseFloats( child.textContent );
+						break;
+
+					case 'source':
+						var id = child.getAttribute( 'id' );
+						data.sources[ id ] = parseSource( child );
+						break;
+
+					case 'joints':
+						data.joints = parseJoints( child );
+						break;
+
+					case 'vertex_weights':
+						data.vertexWeights = parseVertexWeights( child );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseJoints( xml ) {
+
+			var data = {
+				inputs: {}
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'input':
+						var semantic = child.getAttribute( 'semantic' );
+						var id = parseId( child.getAttribute( 'source' ) );
+						data.inputs[ semantic ] = id;
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseVertexWeights( xml ) {
+
+			var data = {
+				inputs: {}
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'input':
+						var semantic = child.getAttribute( 'semantic' );
+						var id = parseId( child.getAttribute( 'source' ) );
+						var offset = parseInt( child.getAttribute( 'offset' ) );
+						data.inputs[ semantic ] = { id: id, offset: offset };
+						break;
+
+					case 'vcount':
+						data.vcount = parseInts( child.textContent );
+						break;
+
+					case 'v':
+						data.v = parseInts( child.textContent );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function buildController( data ) {
+
+			var build = {
+				id: data.id
+			};
+
+			var geometry = library.geometries[ build.id ];
+
+			if ( data.skin !== undefined ) {
+
+				build.skin = buildSkin( data.skin );
+
+				// we enhance the 'sources' property of the corresponding geometry with our skin data
+
+				geometry.sources.skinIndices = build.skin.indices;
+				geometry.sources.skinWeights = build.skin.weights;
+
+			}
+
+			return build;
+
+		}
+
+		function buildSkin( data ) {
+
+			var BONE_LIMIT = 4;
+
+			var build = {
+				joints: [], // this must be an array to preserve the joint order
+				indices: {
+					array: [],
+					stride: BONE_LIMIT
+				},
+				weights: {
+					array: [],
+					stride: BONE_LIMIT
+				}
+			};
+
+			var sources = data.sources;
+			var vertexWeights = data.vertexWeights;
+
+			var vcount = vertexWeights.vcount;
+			var v = vertexWeights.v;
+			var jointOffset = vertexWeights.inputs.JOINT.offset;
+			var weightOffset = vertexWeights.inputs.WEIGHT.offset;
+
+			var jointSource = data.sources[ data.joints.inputs.JOINT ];
+			var inverseSource = data.sources[ data.joints.inputs.INV_BIND_MATRIX ];
+
+			var weights = sources[ vertexWeights.inputs.WEIGHT.id ].array;
+			var stride = 0;
+
+			var i, j, l;
+
+			// procces skin data for each vertex
+
+			for ( i = 0, l = vcount.length; i < l; i ++ ) {
+
+				var jointCount = vcount[ i ]; // this is the amount of joints that affect a single vertex
+				var vertexSkinData = [];
+
+				for ( j = 0; j < jointCount; j ++ ) {
+
+					var skinIndex = v[ stride + jointOffset ];
+					var weightId = v[ stride + weightOffset ];
+					var skinWeight = weights[ weightId ];
+
+					vertexSkinData.push( { index: skinIndex, weight: skinWeight } );
+
+					stride += 2;
+
+				}
+
+				// we sort the joints in descending order based on the weights.
+				// this ensures, we only procced the most important joints of the vertex
+
+				vertexSkinData.sort( descending );
+
+				// now we provide for each vertex a set of four index and weight values.
+				// the order of the skin data matches the order of vertices
+
+				for ( j = 0; j < BONE_LIMIT; j ++ ) {
+
+					var d = vertexSkinData[ j ];
+
+					if ( d !== undefined ) {
+
+						build.indices.array.push( d.index );
+						build.weights.array.push( d.weight );
+
+					} else {
+
+						build.indices.array.push( 0 );
+						build.weights.array.push( 0 );
+
+					}
+
+				}
+
+			}
+
+			// setup bind matrix
+
+			build.bindMatrix = new THREE.Matrix4().fromArray( data.bindShapeMatrix ).transpose();
+
+			// process bones and inverse bind matrix data
+
+			for ( i = 0, l = jointSource.array.length; i < l; i ++ ) {
+
+				var name = jointSource.array[ i ];
+				var boneInverse = new THREE.Matrix4().fromArray( inverseSource.array, i * inverseSource.stride ).transpose();
+
+				build.joints.push( { name: name, boneInverse: boneInverse } );
+
+			}
+
+			return build;
+
+			// array sort function
+
+			function descending( a, b ) {
+
+				return b.weight - a.weight;
+
+			}
+
+		}
+
+		function getController( id ) {
+
+			return getBuild( library.controllers[ id ], buildController );
+
+		}
+
+		// image
+
+		function parseImage( xml ) {
+
+			var data = {
+				init_from: getElementsByTagName( xml, 'init_from' )[ 0 ].textContent
+			};
+
+			library.images[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function buildImage( data ) {
+
+			if ( data.build !== undefined ) return data.build;
+
+			return data.init_from;
+
+		}
+
+		function getImage( id ) {
+
+			var data = library.images[ id ];
+
+			if ( data !== undefined ) {
+
+				return getBuild( data, buildImage );
+
+			}
+
+			console.warn( 'THREE.ColladaLoader: Couldn\'t find image with ID:', id );
+
+			return null;
+
+		}
+
+		// effect
+
+		function parseEffect( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'profile_COMMON':
+						data.profile = parseEffectProfileCOMMON( child );
+						break;
+
+				}
+
+			}
+
+			library.effects[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parseEffectProfileCOMMON( xml ) {
+
+			var data = {
+				surfaces: {},
+				samplers: {}
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'newparam':
+						parseEffectNewparam( child, data );
+						break;
+
+					case 'technique':
+						data.technique = parseEffectTechnique( child );
+						break;
+
+					case 'extra':
+						data.extra = parseEffectExtra( child );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectNewparam( xml, data ) {
+
+			var sid = xml.getAttribute( 'sid' );
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'surface':
+						data.surfaces[ sid ] = parseEffectSurface( child );
+						break;
+
+					case 'sampler2D':
+						data.samplers[ sid ] = parseEffectSampler( child );
+						break;
+
+				}
+
+			}
+
+		}
+
+		function parseEffectSurface( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'init_from':
+						data.init_from = child.textContent;
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectSampler( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'source':
+						data.source = child.textContent;
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectTechnique( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'constant':
+					case 'lambert':
+					case 'blinn':
+					case 'phong':
+						data.type = child.nodeName;
+						data.parameters = parseEffectParameters( child );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectParameters( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'emission':
+					case 'diffuse':
+					case 'specular':
+					case 'shininess':
+					case 'transparency':
+						data[ child.nodeName ] = parseEffectParameter( child );
+						break;
+					case 'transparent':
+						data[ child.nodeName ] = {
+							opaque: child.getAttribute( 'opaque' ),
+							data: parseEffectParameter( child )
+						};
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectParameter( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'color':
+						data[ child.nodeName ] = parseFloats( child.textContent );
+						break;
+
+					case 'float':
+						data[ child.nodeName ] = parseFloat( child.textContent );
+						break;
+
+					case 'texture':
+						data[ child.nodeName ] = { id: child.getAttribute( 'texture' ), extra: parseEffectParameterTexture( child ) };
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectParameterTexture( xml ) {
+
+			var data = {
+				technique: {}
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'extra':
+						parseEffectParameterTextureExtra( child, data );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectParameterTextureExtra( xml, data ) {
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'technique':
+						parseEffectParameterTextureExtraTechnique( child, data );
+						break;
+
+				}
+
+			}
+
+		}
+
+		function parseEffectParameterTextureExtraTechnique( xml, data ) {
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'repeatU':
+					case 'repeatV':
+					case 'offsetU':
+					case 'offsetV':
+						data.technique[ child.nodeName ] = parseFloat( child.textContent );
+						break;
+
+					case 'wrapU':
+					case 'wrapV':
+
+						// some files have values for wrapU/wrapV which become NaN via parseInt
+
+						if ( child.textContent.toUpperCase() === 'TRUE' ) {
+
+							data.technique[ child.nodeName ] = 1;
+
+						} else if ( child.textContent.toUpperCase() === 'FALSE' ) {
+
+							data.technique[ child.nodeName ] = 0;
+
+						} else {
+
+							data.technique[ child.nodeName ] = parseInt( child.textContent );
+
+						}
+
+						break;
+
+				}
+
+			}
+
+		}
+
+		function parseEffectExtra( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'technique':
+						data.technique = parseEffectExtraTechnique( child );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseEffectExtraTechnique( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'double_sided':
+						data[ child.nodeName ] = parseInt( child.textContent );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function buildEffect( data ) {
+
+			return data;
+
+		}
+
+		function getEffect( id ) {
+
+			return getBuild( library.effects[ id ], buildEffect );
+
+		}
+
+		// material
+
+		function parseMaterial( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' )
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'instance_effect':
+						data.url = parseId( child.getAttribute( 'url' ) );
+						break;
+
+				}
+
+			}
+
+			library.materials[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function buildMaterial( data ) {
+
+			var effect = getEffect( data.url );
+			var technique = effect.profile.technique;
+			var extra = effect.profile.extra;
+
+			var material;
+
+			switch ( technique.type ) {
+
+				case 'phong':
+				case 'blinn':
+					material = new THREE.MeshPhongMaterial();
+					break;
+
+				case 'lambert':
+					material = new THREE.MeshLambertMaterial();
+					break;
+
+				default:
+					material = new THREE.MeshBasicMaterial();
+					break;
+
+			}
+
+			material.name = data.name;
+
+			function getTexture( textureObject ) {
+
+				var sampler = effect.profile.samplers[ textureObject.id ];
+				var image = null;
+
+				// get image
+
+				if ( sampler !== undefined ) {
+
+					var surface = effect.profile.surfaces[ sampler.source ];
+					image = getImage( surface.init_from );
+
+				} else {
+
+					console.warn( 'THREE.ColladaLoader: Undefined sampler. Access image directly (see #12530).' );
+					image = getImage( textureObject.id );
+
+				}
+
+				// create texture if image is avaiable
+
+				if ( image !== null ) {
+
+					var texture = textureLoader.load( image );
+
+					var extra = textureObject.extra;
+
+					if ( extra !== undefined && extra.technique !== undefined && isEmpty( extra.technique ) === false ) {
+
+						var technique = extra.technique;
+
+						texture.wrapS = technique.wrapU ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+						texture.wrapT = technique.wrapV ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+
+						texture.offset.set( technique.offsetU || 0, technique.offsetV || 0 );
+						texture.repeat.set( technique.repeatU || 1, technique.repeatV || 1 );
+
+					} else {
+
+						texture.wrapS = THREE.RepeatWrapping;
+						texture.wrapT = THREE.RepeatWrapping;
+
+					}
+
+					return texture;
+
+				} else {
+
+					console.warn( 'THREE.ColladaLoader: Couldn\'t create texture with ID:', textureObject.id );
+
+					return null;
+
+				}
+
+			}
+
+			var parameters = technique.parameters;
+
+			for ( var key in parameters ) {
+
+				var parameter = parameters[ key ];
+
+				switch ( key ) {
+
+					case 'diffuse':
+						if ( parameter.color ) material.color.fromArray( parameter.color );
+						if ( parameter.texture ) material.map = getTexture( parameter.texture );
+						break;
+					case 'specular':
+						if ( parameter.color && material.specular ) material.specular.fromArray( parameter.color );
+						if ( parameter.texture ) material.specularMap = getTexture( parameter.texture );
+						break;
+					case 'shininess':
+						if ( parameter.float && material.shininess ) material.shininess = parameter.float;
+						break;
+					case 'emission':
+						if ( parameter.color && material.emissive ) material.emissive.fromArray( parameter.color );
+						if ( parameter.texture ) material.emissiveMap = getTexture( parameter.texture );
+						break;
+
+				}
+
+			}
+
+			//
+
+			var transparent = parameters[ 'transparent' ];
+			var transparency = parameters[ 'transparency' ];
+
+			// <transparency> does not exist but <transparent>
+
+			if ( transparency === undefined && transparent ) {
+
+				transparency = {
+					float: 1
+				};
+
+			}
+
+			// <transparent> does not exist but <transparency>
+
+			if ( transparent === undefined && transparency ) {
+
+				transparent = {
+					opaque: 'A_ONE',
+					data: {
+						color: [ 1, 1, 1, 1 ]
+					} };
+
+			}
+
+			if ( transparent && transparency ) {
+
+				// handle case if a texture exists but no color
+
+				if ( transparent.data.texture ) {
+
+					// we do not set an alpha map (see #13792)
+
+					material.transparent = true;
+
+				} else {
+
+					var color = transparent.data.color;
+
+					switch ( transparent.opaque ) {
+
+						case 'A_ONE':
+							material.opacity = color[ 3 ] * transparency.float;
+							break;
+						case 'RGB_ZERO':
+							material.opacity = 1 - ( color[ 0 ] * transparency.float );
+							break;
+						case 'A_ZERO':
+							material.opacity = 1 - ( color[ 3 ] * transparency.float );
+							break;
+						case 'RGB_ONE':
+							material.opacity = color[ 0 ] * transparency.float;
+							break;
+						default:
+							console.warn( 'THREE.ColladaLoader: Invalid opaque type "%s" of transparent tag.', transparent.opaque );
+
+					}
+
+					if ( material.opacity < 1 ) material.transparent = true;
+
+				}
+
+			}
+
+			//
+
+			if ( extra !== undefined && extra.technique !== undefined && extra.technique.double_sided === 1 ) {
+
+				material.side = THREE.DoubleSide;
+
+			}
+
+			return material;
+
+		}
+
+		function getMaterial( id ) {
+
+			return getBuild( library.materials[ id ], buildMaterial );
+
+		}
+
+		// camera
+
+		function parseCamera( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' )
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'optics':
+						data.optics = parseCameraOptics( child );
+						break;
+
+				}
+
+			}
+
+			library.cameras[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parseCameraOptics( xml ) {
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				switch ( child.nodeName ) {
+
+					case 'technique_common':
+						return parseCameraTechnique( child );
+
+				}
+
+			}
+
+			return {};
+
+		}
+
+		function parseCameraTechnique( xml ) {
+
+			var data = {};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				switch ( child.nodeName ) {
+
+					case 'perspective':
+					case 'orthographic':
+
+						data.technique = child.nodeName;
+						data.parameters = parseCameraParameters( child );
+
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseCameraParameters( xml ) {
+
+			var data = {};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				switch ( child.nodeName ) {
+
+					case 'xfov':
+					case 'yfov':
+					case 'xmag':
+					case 'ymag':
+					case 'znear':
+					case 'zfar':
+					case 'aspect_ratio':
+						data[ child.nodeName ] = parseFloat( child.textContent );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function buildCamera( data ) {
+
+			var camera;
+
+			switch ( data.optics.technique ) {
+
+				case 'perspective':
+					camera = new THREE.PerspectiveCamera(
+						data.optics.parameters.yfov,
+						data.optics.parameters.aspect_ratio,
+						data.optics.parameters.znear,
+						data.optics.parameters.zfar
+					);
+					break;
+
+				case 'orthographic':
+					var ymag = data.optics.parameters.ymag;
+					var xmag = data.optics.parameters.xmag;
+					var aspectRatio = data.optics.parameters.aspect_ratio;
+
+					xmag = ( xmag === undefined ) ? ( ymag * aspectRatio ) : xmag;
+					ymag = ( ymag === undefined ) ? ( xmag / aspectRatio ) : ymag;
+
+					xmag *= 0.5;
+					ymag *= 0.5;
+
+					camera = new THREE.OrthographicCamera(
+						- xmag, xmag, ymag, - ymag, // left, right, top, bottom
+						data.optics.parameters.znear,
+						data.optics.parameters.zfar
+					);
+					break;
+
+				default:
+					camera = new THREE.PerspectiveCamera();
+					break;
+
+			}
+
+			camera.name = data.name;
+
+			return camera;
+
+		}
+
+		function getCamera( id ) {
+
+			var data = library.cameras[ id ];
+
+			if ( data !== undefined ) {
+
+				return getBuild( data, buildCamera );
+
+			}
+
+			console.warn( 'THREE.ColladaLoader: Couldn\'t find camera with ID:', id );
+
+			return null;
+
+		}
+
+		// light
+
+		function parseLight( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'technique_common':
+						data = parseLightTechnique( child );
+						break;
+
+				}
+
+			}
+
+			library.lights[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parseLightTechnique( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'directional':
+					case 'point':
+					case 'spot':
+					case 'ambient':
+
+						data.technique = child.nodeName;
+						data.parameters = parseLightParameters( child );
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseLightParameters( xml ) {
+
+			var data = {};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'color':
+						var array = parseFloats( child.textContent );
+						data.color = new THREE.Color().fromArray( array );
+						break;
+
+					case 'falloff_angle':
+						data.falloffAngle = parseFloat( child.textContent );
+						break;
+
+					case 'quadratic_attenuation':
+						var f = parseFloat( child.textContent );
+						data.distance = f ? Math.sqrt( 1 / f ) : 0;
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function buildLight( data ) {
+
+			var light;
+
+			switch ( data.technique ) {
+
+				case 'directional':
+					light = new THREE.DirectionalLight();
+					break;
+
+				case 'point':
+					light = new THREE.PointLight();
+					break;
+
+				case 'spot':
+					light = new THREE.SpotLight();
+					break;
+
+				case 'ambient':
+					light = new THREE.AmbientLight();
+					break;
+
+			}
+
+			if ( data.parameters.color ) light.color.copy( data.parameters.color );
+			if ( data.parameters.distance ) light.distance = data.parameters.distance;
+
+			return light;
+
+		}
+
+		function getLight( id ) {
+
+			var data = library.lights[ id ];
+
+			if ( data !== undefined ) {
+
+				return getBuild( data, buildLight );
+
+			}
+
+			console.warn( 'THREE.ColladaLoader: Couldn\'t find light with ID:', id );
+
+			return null;
+
+		}
+
+		// geometry
+
+		function parseGeometry( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' ),
+				sources: {},
+				vertices: {},
+				primitives: []
+			};
+
+			var mesh = getElementsByTagName( xml, 'mesh' )[ 0 ];
+
+			// the following tags inside geometry are not supported yet (see https://github.com/mrdoob/three.js/pull/12606): convex_mesh, spline, brep
+			if ( mesh === undefined ) return;
+
+			for ( var i = 0; i < mesh.childNodes.length; i ++ ) {
+
+				var child = mesh.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				var id = child.getAttribute( 'id' );
+
+				switch ( child.nodeName ) {
+
+					case 'source':
+						data.sources[ id ] = parseSource( child );
+						break;
+
+					case 'vertices':
+						// data.sources[ id ] = data.sources[ parseId( getElementsByTagName( child, 'input' )[ 0 ].getAttribute( 'source' ) ) ];
+						data.vertices = parseGeometryVertices( child );
+						break;
+
+					case 'polygons':
+						console.warn( 'THREE.ColladaLoader: Unsupported primitive type: ', child.nodeName );
+						break;
+
+					case 'lines':
+					case 'linestrips':
+					case 'polylist':
+					case 'triangles':
+						data.primitives.push( parseGeometryPrimitive( child ) );
+						break;
+
+					default:
+						console.log( child );
+
+				}
+
+			}
+
+			library.geometries[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parseSource( xml ) {
+
+			var data = {
+				array: [],
+				stride: 3
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'float_array':
+						data.array = parseFloats( child.textContent );
+						break;
+
+					case 'Name_array':
+						data.array = parseStrings( child.textContent );
+						break;
+
+					case 'technique_common':
+						var accessor = getElementsByTagName( child, 'accessor' )[ 0 ];
+
+						if ( accessor !== undefined ) {
+
+							data.stride = parseInt( accessor.getAttribute( 'stride' ) );
+
+						}
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseGeometryVertices( xml ) {
+
+			var data = {};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				data[ child.getAttribute( 'semantic' ) ] = parseId( child.getAttribute( 'source' ) );
+
+			}
+
+			return data;
+
+		}
+
+		function parseGeometryPrimitive( xml ) {
+
+			var primitive = {
+				type: xml.nodeName,
+				material: xml.getAttribute( 'material' ),
+				count: parseInt( xml.getAttribute( 'count' ) ),
+				inputs: {},
+				stride: 0,
+				hasUV: false
+			};
+
+			for ( var i = 0, l = xml.childNodes.length; i < l; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'input':
+						var id = parseId( child.getAttribute( 'source' ) );
+						var semantic = child.getAttribute( 'semantic' );
+						var offset = parseInt( child.getAttribute( 'offset' ) );
+						primitive.inputs[ semantic ] = { id: id, offset: offset };
+						primitive.stride = Math.max( primitive.stride, offset + 1 );
+						if ( semantic === 'TEXCOORD' ) primitive.hasUV = true;
+						break;
+
+					case 'vcount':
+						primitive.vcount = parseInts( child.textContent );
+						break;
+
+					case 'p':
+						primitive.p = parseInts( child.textContent );
+						break;
+
+				}
+
+			}
+
+			return primitive;
+
+		}
+
+		function groupPrimitives( primitives ) {
+
+			var build = {};
+
+			for ( var i = 0; i < primitives.length; i ++ ) {
+
+				var primitive = primitives[ i ];
+
+				if ( build[ primitive.type ] === undefined ) build[ primitive.type ] = [];
+
+				build[ primitive.type ].push( primitive );
+
+			}
+
+			return build;
+
+		}
+
+		function checkUVCoordinates( primitives ) {
+
+			var count = 0;
+
+			for ( var i = 0, l = primitives.length; i < l; i ++ ) {
+
+				var primitive = primitives[ i ];
+
+				if ( primitive.hasUV === true ) {
+
+					count ++;
+
+				}
+
+			}
+
+			if ( count > 0 && count < primitives.length ) {
+
+				primitives.uvsNeedsFix = true;
+
+			}
+
+		}
+
+		function buildGeometry( data ) {
+
+			var build = {};
+
+			var sources = data.sources;
+			var vertices = data.vertices;
+			var primitives = data.primitives;
+
+			if ( primitives.length === 0 ) return {};
+
+			// our goal is to create one buffer geometry for a single type of primitives
+			// first, we group all primitives by their type
+
+			var groupedPrimitives = groupPrimitives( primitives );
+
+			for ( var type in groupedPrimitives ) {
+
+				var primitiveType = groupedPrimitives[ type ];
+
+				// second, ensure consistent uv coordinates for each type of primitives (polylist,triangles or lines)
+
+				checkUVCoordinates( primitiveType );
+
+				// third, create a buffer geometry for each type of primitives
+
+				build[ type ] = buildGeometryType( primitiveType, sources, vertices );
+
+			}
+
+			return build;
+
+		}
+
+		function buildGeometryType( primitives, sources, vertices ) {
+
+			var build = {};
+
+			var position = { array: [], stride: 0 };
+			var normal = { array: [], stride: 0 };
+			var uv = { array: [], stride: 0 };
+			var color = { array: [], stride: 0 };
+
+			var skinIndex = { array: [], stride: 4 };
+			var skinWeight = { array: [], stride: 4 };
+
+			var geometry = new THREE.BufferGeometry();
+
+			var materialKeys = [];
+
+			var start = 0;
+
+			for ( var p = 0; p < primitives.length; p ++ ) {
+
+				var primitive = primitives[ p ];
+				var inputs = primitive.inputs;
+
+				// groups
+
+				var count = 0;
+
+				switch ( primitive.type ) {
+
+					case 'lines':
+					case 'linestrips':
+						count = primitive.count * 2;
+						break;
+
+					case 'triangles':
+						count = primitive.count * 3;
+						break;
+
+					case 'polylist':
+
+						for ( var g = 0; g < primitive.count; g ++ ) {
+
+							var vc = primitive.vcount[ g ];
+
+							switch ( vc ) {
+
+								case 3:
+									count += 3; // single triangle
+									break;
+
+								case 4:
+									count += 6; // quad, subdivided into two triangles
+									break;
+
+								default:
+									count += ( vc - 2 ) * 3; // polylist with more than four vertices
+									break;
+
+							}
+
+						}
+
+						break;
+
+					default:
+						console.warn( 'THREE.ColladaLoader: Unknow primitive type:', primitive.type );
+
+				}
+
+				geometry.addGroup( start, count, p );
+				start += count;
+
+				// material
+
+				if ( primitive.material ) {
+
+					materialKeys.push( primitive.material );
+
+				}
+
+				// geometry data
+
+				for ( var name in inputs ) {
+
+					var input = inputs[ name ];
+
+					switch ( name )	{
+
+						case 'VERTEX':
+							for ( var key in vertices ) {
+
+								var id = vertices[ key ];
+
+								switch ( key ) {
+
+									case 'POSITION':
+										var prevLength = position.array.length;
+										buildGeometryData( primitive, sources[ id ], input.offset, position.array );
+										position.stride = sources[ id ].stride;
+
+										if ( sources.skinWeights && sources.skinIndices ) {
+
+											buildGeometryData( primitive, sources.skinIndices, input.offset, skinIndex.array );
+											buildGeometryData( primitive, sources.skinWeights, input.offset, skinWeight.array );
+
+										}
+
+										// see #3803
+
+										if ( primitive.hasUV === false && primitives.uvsNeedsFix === true ) {
+
+											var count = ( position.array.length - prevLength ) / position.stride;
+
+											for ( var i = 0; i < count; i ++ ) {
+
+												// fill missing uv coordinates
+
+												uv.array.push( 0, 0 );
+
+											}
+
+										}
+										break;
+
+									case 'NORMAL':
+										buildGeometryData( primitive, sources[ id ], input.offset, normal.array );
+										normal.stride = sources[ id ].stride;
+										break;
+
+									case 'COLOR':
+										buildGeometryData( primitive, sources[ id ], input.offset, color.array );
+										color.stride = sources[ id ].stride;
+										break;
+
+									case 'TEXCOORD':
+										buildGeometryData( primitive, sources[ id ], input.offset, uv.array );
+										uv.stride = sources[ id ].stride;
+										break;
+
+									default:
+										console.warn( 'THREE.ColladaLoader: Semantic "%s" not handled in geometry build process.', key );
+
+								}
+
+							}
+							break;
+
+						case 'NORMAL':
+							buildGeometryData( primitive, sources[ input.id ], input.offset, normal.array );
+							normal.stride = sources[ input.id ].stride;
+							break;
+
+						case 'COLOR':
+							buildGeometryData( primitive, sources[ input.id ], input.offset, color.array );
+							color.stride = sources[ input.id ].stride;
+							break;
+
+						case 'TEXCOORD':
+							buildGeometryData( primitive, sources[ input.id ], input.offset, uv.array );
+							uv.stride = sources[ input.id ].stride;
+							break;
+
+					}
+
+				}
+
+			}
+
+			// build geometry
+
+			if ( position.array.length > 0 ) geometry.addAttribute( 'position', new THREE.Float32BufferAttribute( position.array, position.stride ) );
+			if ( normal.array.length > 0 ) geometry.addAttribute( 'normal', new THREE.Float32BufferAttribute( normal.array, normal.stride ) );
+			if ( color.array.length > 0 ) geometry.addAttribute( 'color', new THREE.Float32BufferAttribute( color.array, color.stride ) );
+			if ( uv.array.length > 0 ) geometry.addAttribute( 'uv', new THREE.Float32BufferAttribute( uv.array, uv.stride ) );
+
+			if ( skinIndex.array.length > 0 ) geometry.addAttribute( 'skinIndex', new THREE.Float32BufferAttribute( skinIndex.array, skinIndex.stride ) );
+			if ( skinWeight.array.length > 0 ) geometry.addAttribute( 'skinWeight', new THREE.Float32BufferAttribute( skinWeight.array, skinWeight.stride ) );
+
+			build.data = geometry;
+			build.type = primitives[ 0 ].type;
+			build.materialKeys = materialKeys;
+
+			return build;
+
+		}
+
+		function buildGeometryData( primitive, source, offset, array ) {
+
+			var indices = primitive.p;
+			var stride = primitive.stride;
+			var vcount = primitive.vcount;
+
+			function pushVector( i ) {
+
+				var index = indices[ i + offset ] * sourceStride;
+				var length = index + sourceStride;
+
+				for ( ; index < length; index ++ ) {
+
+					array.push( sourceArray[ index ] );
+
+				}
+
+			}
+
+			var sourceArray = source.array;
+			var sourceStride = source.stride;
+
+			if ( primitive.vcount !== undefined ) {
+
+				var index = 0;
+
+				for ( var i = 0, l = vcount.length; i < l; i ++ ) {
+
+					var count = vcount[ i ];
+
+					if ( count === 4 ) {
+
+						var a = index + stride * 0;
+						var b = index + stride * 1;
+						var c = index + stride * 2;
+						var d = index + stride * 3;
+
+						pushVector( a ); pushVector( b ); pushVector( d );
+						pushVector( b ); pushVector( c ); pushVector( d );
+
+					} else if ( count === 3 ) {
+
+						var a = index + stride * 0;
+						var b = index + stride * 1;
+						var c = index + stride * 2;
+
+						pushVector( a ); pushVector( b ); pushVector( c );
+
+					} else if ( count > 4 ) {
+
+						for ( var k = 1, kl = ( count - 2 ); k <= kl; k ++ ) {
+
+							var a = index + stride * 0;
+							var b = index + stride * k;
+							var c = index + stride * ( k + 1 );
+
+							pushVector( a ); pushVector( b ); pushVector( c );
+
+						}
+
+					}
+
+					index += stride * count;
+
+				}
+
+			} else {
+
+				for ( var i = 0, l = indices.length; i < l; i += stride ) {
+
+					pushVector( i );
+
+				}
+
+			}
+
+		}
+
+		function getGeometry( id ) {
+
+			return getBuild( library.geometries[ id ], buildGeometry );
+
+		}
+
+		// kinematics
+
+		function parseKinematicsModel( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' ) || '',
+				joints: {},
+				links: []
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'technique_common':
+						parseKinematicsTechniqueCommon( child, data );
+						break;
+
+				}
+
+			}
+
+			library.kinematicsModels[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function buildKinematicsModel( data ) {
+
+			if ( data.build !== undefined ) return data.build;
+
+			return data;
+
+		}
+
+		function getKinematicsModel( id ) {
+
+			return getBuild( library.kinematicsModels[ id ], buildKinematicsModel );
+
+		}
+
+		function parseKinematicsTechniqueCommon( xml, data ) {
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'joint':
+						data.joints[ child.getAttribute( 'sid' ) ] = parseKinematicsJoint( child );
+						break;
+
+					case 'link':
+						data.links.push( parseKinematicsLink( child ) );
+						break;
+
+				}
+
+			}
+
+		}
+
+		function parseKinematicsJoint( xml ) {
+
+			var data;
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'prismatic':
+					case 'revolute':
+						data = parseKinematicsJointParameter( child );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseKinematicsJointParameter( xml, data ) {
+
+			var data = {
+				sid: xml.getAttribute( 'sid' ),
+				name: xml.getAttribute( 'name' ) || '',
+				axis: new THREE.Vector3(),
+				limits: {
+					min: 0,
+					max: 0
+				},
+				type: xml.nodeName,
+				static: false,
+				zeroPosition: 0,
+				middlePosition: 0
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'axis':
+						var array = parseFloats( child.textContent );
+						data.axis.fromArray( array );
+						break;
+					case 'limits':
+						var max = child.getElementsByTagName( 'max' )[ 0 ];
+						var min = child.getElementsByTagName( 'min' )[ 0 ];
+
+						data.limits.max = parseFloat( max.textContent );
+						data.limits.min = parseFloat( min.textContent );
+						break;
+
+				}
+
+			}
+
+			// if min is equal to or greater than max, consider the joint static
+
+			if ( data.limits.min >= data.limits.max ) {
+
+				data.static = true;
+
+			}
+
+			// calculate middle position
+
+			data.middlePosition = ( data.limits.min + data.limits.max ) / 2.0;
+
+			return data;
+
+		}
+
+		function parseKinematicsLink( xml ) {
+
+			var data = {
+				sid: xml.getAttribute( 'sid' ),
+				name: xml.getAttribute( 'name' ) || '',
+				attachments: [],
+				transforms: []
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'attachment_full':
+						data.attachments.push( parseKinematicsAttachment( child ) );
+						break;
+
+					case 'matrix':
+					case 'translate':
+					case 'rotate':
+						data.transforms.push( parseKinematicsTransform( child ) );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseKinematicsAttachment( xml ) {
+
+			var data = {
+				joint: xml.getAttribute( 'joint' ).split( '/' ).pop(),
+				transforms: [],
+				links: []
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'link':
+						data.links.push( parseKinematicsLink( child ) );
+						break;
+
+					case 'matrix':
+					case 'translate':
+					case 'rotate':
+						data.transforms.push( parseKinematicsTransform( child ) );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function parseKinematicsTransform( xml ) {
+
+			var data = {
+				type: xml.nodeName
+			};
+
+			var array = parseFloats( xml.textContent );
+
+			switch ( data.type ) {
+
+				case 'matrix':
+					data.obj = new THREE.Matrix4();
+					data.obj.fromArray( array ).transpose();
+					break;
+
+				case 'translate':
+					data.obj = new THREE.Vector3();
+					data.obj.fromArray( array );
+					break;
+
+				case 'rotate':
+					data.obj = new THREE.Vector3();
+					data.obj.fromArray( array );
+					data.angle = THREE.Math.degToRad( array[ 3 ] );
+					break;
+
+			}
+
+			return data;
+
+		}
+
+		// physics
+
+		function parsePhysicsModel( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' ) || '',
+				rigidBodies: {}
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'rigid_body':
+						data.rigidBodies[ child.getAttribute( 'name' ) ] = {};
+						parsePhysicsRigidBody( child, data.rigidBodies[ child.getAttribute( 'name' ) ] );
+						break;
+
+				}
+
+			}
+
+			library.physicsModels[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function parsePhysicsRigidBody( xml, data ) {
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'technique_common':
+						parsePhysicsTechniqueCommon( child, data );
+						break;
+
+				}
+
+			}
+
+		}
+
+		function parsePhysicsTechniqueCommon( xml, data ) {
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'inertia':
+						data.inertia = parseFloats( child.textContent );
+						break;
+
+					case 'mass':
+						data.mass = parseFloats( child.textContent )[0];
+						break;
+
+				}
+
+			}
+
+		}
+
+		// scene
+
+		function parseKinematicsScene( xml ) {
+
+			var data = {
+				bindJointAxis: []
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'bind_joint_axis':
+						data.bindJointAxis.push( parseKinematicsBindJointAxis( child ) );
+						break;
+
+				}
+
+			}
+
+			library.kinematicsScenes[ parseId( xml.getAttribute( 'url' ) ) ] = data;
+
+		}
+
+		function parseKinematicsBindJointAxis( xml ) {
+
+			var data = {
+				target: xml.getAttribute( 'target' ).split( '/' ).pop()
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'axis':
+						var param = child.getElementsByTagName( 'param' )[ 0 ];
+						data.axis = param.textContent;
+						var tmpJointIndex = data.axis.split( 'inst_' ).pop().split( 'axis' )[ 0 ];
+						data.jointIndex = tmpJointIndex.substr( 0, tmpJointIndex.length - 1 );
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function buildKinematicsScene( data ) {
+
+			if ( data.build !== undefined ) return data.build;
+
+			return data;
+
+		}
+
+		function getKinematicsScene( id ) {
+
+			return getBuild( library.kinematicsScenes[ id ], buildKinematicsScene );
+
+		}
+
+		function setupKinematics() {
+
+			var kinematicsModelId = Object.keys( library.kinematicsModels )[ 0 ];
+			var kinematicsSceneId = Object.keys( library.kinematicsScenes )[ 0 ];
+			var visualSceneId = Object.keys( library.visualScenes )[ 0 ];
+
+			if ( kinematicsModelId === undefined || kinematicsSceneId === undefined ) return;
+
+			var kinematicsModel = getKinematicsModel( kinematicsModelId );
+			var kinematicsScene = getKinematicsScene( kinematicsSceneId );
+			var visualScene = getVisualScene( visualSceneId );
+
+			var bindJointAxis = kinematicsScene.bindJointAxis;
+			var jointMap = {};
+
+			for ( var i = 0, l = bindJointAxis.length; i < l; i ++ ) {
+
+				var axis = bindJointAxis[ i ];
+
+				// the result of the following query is an element of type 'translate', 'rotate','scale' or 'matrix'
+
+				var targetElement = collada.querySelector( '[sid="' + axis.target + '"]' );
+
+				if ( targetElement ) {
+
+					// get the parent of the transfrom element
+
+					var parentVisualElement = targetElement.parentElement;
+
+					// connect the joint of the kinematics model with the element in the visual scene
+
+					connect( axis.jointIndex, parentVisualElement );
+
+				}
+
+			}
+
+			function connect( jointIndex, visualElement ) {
+
+				var visualElementName = visualElement.getAttribute( 'name' );
+				var joint = kinematicsModel.joints[ jointIndex ];
+
+				visualScene.traverse( function ( object ) {
+
+					if ( object.name === visualElementName ) {
+
+						jointMap[ jointIndex ] = {
+							object: object,
+							transforms: buildTransformList( visualElement ),
+							joint: joint,
+							position: joint.zeroPosition
+						};
+
+					}
+
+				} );
+
+			}
+
+			var m0 = new THREE.Matrix4();
+
+			kinematics = {
+
+				joints: kinematicsModel && kinematicsModel.joints,
+
+				getJointValue: function ( jointIndex ) {
+
+					var jointData = jointMap[ jointIndex ];
+
+					if ( jointData ) {
+
+						return jointData.position;
+
+					} else {
+
+						console.warn( 'THREE.ColladaLoader: Joint ' + jointIndex + ' doesn\'t exist.' );
+
+					}
+
+				},
+
+				setJointValue: function ( jointIndex, value ) {
+
+					var jointData = jointMap[ jointIndex ];
+
+					if ( jointData ) {
+
+						var joint = jointData.joint;
+
+						if ( value > joint.limits.max || value < joint.limits.min ) {
+
+							console.warn( 'THREE.ColladaLoader: Joint ' + jointIndex + ' value ' + value + ' outside of limits (min: ' + joint.limits.min + ', max: ' + joint.limits.max + ').' );
+
+						} else if ( joint.static ) {
+
+							console.warn( 'THREE.ColladaLoader: Joint ' + jointIndex + ' is static.' );
+
+						} else {
+
+							var object = jointData.object;
+							var axis = joint.axis;
+							var transforms = jointData.transforms;
+
+							matrix.identity();
+
+							// each update, we have to apply all transforms in the correct order
+
+							for ( var i = 0; i < transforms.length; i ++ ) {
+
+								var transform = transforms[ i ];
+
+								// if there is a connection of the transform node with a joint, apply the joint value
+
+								if ( transform.sid && transform.sid.indexOf( jointIndex ) !== - 1 ) {
+
+									switch ( joint.type ) {
+
+										case 'revolute':
+											matrix.multiply( m0.makeRotationAxis( axis, THREE.Math.degToRad( value ) ) );
+											break;
+
+										case 'prismatic':
+											matrix.multiply( m0.makeTranslation( axis.x * value, axis.y * value, axis.z * value ) );
+											break;
+
+										default:
+											console.warn( 'THREE.ColladaLoader: Unknown joint type: ' + joint.type );
+											break;
+
+									}
+
+								} else {
+
+									switch ( transform.type ) {
+
+										case 'matrix':
+											matrix.multiply( transform.obj );
+											break;
+
+										case 'translate':
+											matrix.multiply( m0.makeTranslation( transform.obj.x, transform.obj.y, transform.obj.z ) );
+											break;
+
+										case 'scale':
+											matrix.scale( transform.obj );
+											break;
+
+										case 'rotate':
+											matrix.multiply( m0.makeRotationAxis( transform.obj, transform.angle ) );
+											break;
+
+									}
+
+								}
+
+							}
+
+							object.matrix.copy( matrix );
+							object.matrix.decompose( object.position, object.quaternion, object.scale );
+
+							jointMap[ jointIndex ].position = value;
+
+						}
+
+					} else {
+
+						console.log( 'THREE.ColladaLoader: ' + jointIndex + ' does not exist.' );
+
+					}
+
+				}
+
+			};
+
+		}
+
+		function buildTransformList( node ) {
+
+			var transforms = [];
+
+			var xml = collada.querySelector( '[id="' + node.id + '"]' );
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'matrix':
+						var array = parseFloats( child.textContent );
+						var matrix = new THREE.Matrix4().fromArray( array ).transpose();
+						transforms.push( {
+							sid: child.getAttribute( 'sid' ),
+							type: child.nodeName,
+							obj: matrix
+						} );
+						break;
+
+					case 'translate':
+					case 'scale':
+						var array = parseFloats( child.textContent );
+						var vector = new THREE.Vector3().fromArray( array );
+						transforms.push( {
+							sid: child.getAttribute( 'sid' ),
+							type: child.nodeName,
+							obj: vector
+						} );
+						break;
+
+					case 'rotate':
+						var array = parseFloats( child.textContent );
+						var vector = new THREE.Vector3().fromArray( array );
+						var angle = THREE.Math.degToRad( array[ 3 ] );
+						transforms.push( {
+							sid: child.getAttribute( 'sid' ),
+							type: child.nodeName,
+							obj: vector,
+							angle: angle
+						} );
+						break;
+
+				}
+
+			}
+
+			return transforms;
+
+		}
+
+		// nodes
+
+		function prepareNodes( xml ) {
+
+			var elements = xml.getElementsByTagName( 'node' );
+
+			// ensure all node elements have id attributes
+
+			for ( var i = 0; i < elements.length; i ++ ) {
+
+				var element = elements[ i ];
+
+				if ( element.hasAttribute( 'id' ) === false ) {
+
+					element.setAttribute( 'id', generateId() );
+
+				}
+
+			}
+
+		}
+
+		var matrix = new THREE.Matrix4();
+		var vector = new THREE.Vector3();
+
+		function parseNode( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' ) || '',
+				type: xml.getAttribute( 'type' ),
+				id: xml.getAttribute( 'id' ),
+				sid: xml.getAttribute( 'sid' ),
+				matrix: new THREE.Matrix4(),
+				nodes: [],
+				instanceCameras: [],
+				instanceControllers: [],
+				instanceLights: [],
+				instanceGeometries: [],
+				instanceNodes: [],
+				transforms: {}
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				if ( child.nodeType !== 1 ) continue;
+
+				switch ( child.nodeName ) {
+
+					case 'node':
+						data.nodes.push( child.getAttribute( 'id' ) );
+						parseNode( child );
+						break;
+
+					case 'instance_camera':
+						data.instanceCameras.push( parseId( child.getAttribute( 'url' ) ) );
+						break;
+
+					case 'instance_controller':
+						data.instanceControllers.push( parseNodeInstance( child ) );
+						break;
+
+					case 'instance_light':
+						data.instanceLights.push( parseId( child.getAttribute( 'url' ) ) );
+						break;
+
+					case 'instance_geometry':
+						data.instanceGeometries.push( parseNodeInstance( child ) );
+						break;
+
+					case 'instance_node':
+						data.instanceNodes.push( parseId( child.getAttribute( 'url' ) ) );
+						break;
+
+					case 'matrix':
+						var array = parseFloats( child.textContent );
+						data.matrix.multiply( matrix.fromArray( array ).transpose() );
+						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
+						break;
+
+					case 'translate':
+						var array = parseFloats( child.textContent );
+						vector.fromArray( array );
+						data.matrix.multiply( matrix.makeTranslation( vector.x, vector.y, vector.z ) );
+						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
+						break;
+
+					case 'rotate':
+						var array = parseFloats( child.textContent );
+						var angle = THREE.Math.degToRad( array[ 3 ] );
+						data.matrix.multiply( matrix.makeRotationAxis( vector.fromArray( array ), angle ) );
+						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
+						break;
+
+					case 'scale':
+						var array = parseFloats( child.textContent );
+						data.matrix.scale( vector.fromArray( array ) );
+						data.transforms[ child.getAttribute( 'sid' ) ] = child.nodeName;
+						break;
+
+					case 'extra':
+						break;
+
+					default:
+						console.log( child );
+
+				}
+
+			}
+
+			library.nodes[ data.id ] = data;
+
+			return data;
+
+		}
+
+		function parseNodeInstance( xml ) {
+
+			var data = {
+				id: parseId( xml.getAttribute( 'url' ) ),
+				materials: {},
+				skeletons: []
+			};
+
+			for ( var i = 0; i < xml.childNodes.length; i ++ ) {
+
+				var child = xml.childNodes[ i ];
+
+				switch ( child.nodeName ) {
+
+					case 'bind_material':
+						var instances = child.getElementsByTagName( 'instance_material' );
+
+						for ( var j = 0; j < instances.length; j ++ ) {
+
+							var instance = instances[ j ];
+							var symbol = instance.getAttribute( 'symbol' );
+							var target = instance.getAttribute( 'target' );
+
+							data.materials[ symbol ] = parseId( target );
+
+						}
+
+						break;
+
+					case 'skeleton':
+						data.skeletons.push( parseId( child.textContent ) );
+						break;
+
+					default:
+						break;
+
+				}
+
+			}
+
+			return data;
+
+		}
+
+		function buildSkeleton( skeletons, joints ) {
+
+			var boneData = [];
+			var sortedBoneData = [];
+
+			var i, j, data;
+
+			// a skeleton can have multiple root bones. collada expresses this
+			// situtation with multiple "skeleton" tags per controller instance
+
+			for ( i = 0; i < skeletons.length; i ++ ) {
+
+				var skeleton = skeletons[ i ];
+
+				var root;
+
+				if ( hasNode( skeleton ) ) {
+
+					root = getNode( skeleton );
+					buildBoneHierarchy( root, joints, boneData );
+
+				} else if ( hasVisualScene( skeleton ) ) {
+
+					// handle case where the skeleton refers to the visual scene (#13335)
+
+					var visualScene = library.visualScenes[ skeleton ];
+					var children = visualScene.children;
+
+					for ( var j = 0; j < children.length; j ++ ) {
+
+						var child = children[ j ];
+
+						if ( child.type === 'JOINT' ) {
+
+							var root = getNode( child.id );
+							buildBoneHierarchy( root, joints, boneData );
+
+						}
+
+					}
+
+				} else {
+
+					console.error( 'THREE.ColladaLoader: Unable to find root bone of skeleton with ID:', skeleton );
+
+				}
+
+			}
+
+			// sort bone data (the order is defined in the corresponding controller)
+
+			for ( i = 0; i < joints.length; i ++ ) {
+
+				for ( j = 0; j < boneData.length; j ++ ) {
+
+					data = boneData[ j ];
+
+					if ( data.bone.name === joints[ i ].name ) {
+
+						sortedBoneData[ i ] = data;
+						data.processed = true;
+						break;
+
+					}
+
+				}
+
+			}
+
+			// add unprocessed bone data at the end of the list
+
+			for ( i = 0; i < boneData.length; i ++ ) {
+
+				data = boneData[ i ];
+
+				if ( data.processed === false ) {
+
+					sortedBoneData.push( data );
+					data.processed = true;
+
+				}
+
+			}
+
+			// setup arrays for skeleton creation
+
+			var bones = [];
+			var boneInverses = [];
+
+			for ( i = 0; i < sortedBoneData.length; i ++ ) {
+
+				data = sortedBoneData[ i ];
+
+				bones.push( data.bone );
+				boneInverses.push( data.boneInverse );
+
+			}
+
+			return new THREE.Skeleton( bones, boneInverses );
+
+		}
+
+		function buildBoneHierarchy( root, joints, boneData ) {
+
+			// setup bone data from visual scene
+
+			root.traverse( function ( object ) {
+
+				if ( object.isBone === true ) {
+
+					var boneInverse;
+
+					// retrieve the boneInverse from the controller data
+
+					for ( var i = 0; i < joints.length; i ++ ) {
+
+						var joint = joints[ i ];
+
+						if ( joint.name === object.name ) {
+
+							boneInverse = joint.boneInverse;
+							break;
+
+						}
+
+					}
+
+					if ( boneInverse === undefined ) {
+
+						// Unfortunately, there can be joints in the visual scene that are not part of the
+						// corresponding controller. In this case, we have to create a dummy boneInverse matrix
+						// for the respective bone. This bone won't affect any vertices, because there are no skin indices
+						// and weights defined for it. But we still have to add the bone to the sorted bone list in order to
+						// ensure a correct animation of the model.
+
+						boneInverse = new THREE.Matrix4();
+
+					}
+
+					boneData.push( { bone: object, boneInverse: boneInverse, processed: false } );
+
+				}
+
+			} );
+
+		}
+
+		function buildNode( data ) {
+
+			var objects = [];
+
+			var matrix = data.matrix;
+			var nodes = data.nodes;
+			var type = data.type;
+			var instanceCameras = data.instanceCameras;
+			var instanceControllers = data.instanceControllers;
+			var instanceLights = data.instanceLights;
+			var instanceGeometries = data.instanceGeometries;
+			var instanceNodes = data.instanceNodes;
+
+			// nodes
+
+			for ( var i = 0, l = nodes.length; i < l; i ++ ) {
+
+				objects.push( getNode( nodes[ i ] ) );
+
+			}
+
+			// instance cameras
+
+			for ( var i = 0, l = instanceCameras.length; i < l; i ++ ) {
+
+				var instanceCamera = getCamera( instanceCameras[ i ] );
+
+				if ( instanceCamera !== null ) {
+
+					objects.push( instanceCamera.clone() );
+
+				}
+
+			}
+
+			// instance controllers
+
+			for ( var i = 0, l = instanceControllers.length; i < l; i ++ ) {
+
+				var instance = instanceControllers[ i ];
+				var controller = getController( instance.id );
+				var geometries = getGeometry( controller.id );
+				var newObjects = buildObjects( geometries, instance.materials );
+
+				var skeletons = instance.skeletons;
+				var joints = controller.skin.joints;
+
+				var skeleton = buildSkeleton( skeletons, joints );
+
+				for ( var j = 0, jl = newObjects.length; j < jl; j ++ ) {
+
+					var object = newObjects[ j ];
+
+					if ( object.isSkinnedMesh ) {
+
+						object.bind( skeleton, controller.skin.bindMatrix );
+						object.normalizeSkinWeights();
+
+					}
+
+					objects.push( object );
+
+				}
+
+			}
+
+			// instance lights
+
+			for ( var i = 0, l = instanceLights.length; i < l; i ++ ) {
+
+				var instanceLight = getLight( instanceLights[ i ] );
+
+				if ( instanceLight !== null ) {
+
+					objects.push( instanceLight.clone() );
+
+				}
+
+			}
+
+			// instance geometries
+
+			for ( var i = 0, l = instanceGeometries.length; i < l; i ++ ) {
+
+				var instance = instanceGeometries[ i ];
+
+				// a single geometry instance in collada can lead to multiple object3Ds.
+				// this is the case when primitives are combined like triangles and lines
+
+				var geometries = getGeometry( instance.id );
+				var newObjects = buildObjects( geometries, instance.materials );
+
+				for ( var j = 0, jl = newObjects.length; j < jl; j ++ ) {
+
+					objects.push( newObjects[ j ] );
+
+				}
+
+			}
+
+			// instance nodes
+
+			for ( var i = 0, l = instanceNodes.length; i < l; i ++ ) {
+
+				objects.push( getNode( instanceNodes[ i ] ).clone() );
+
+			}
+
+			var object;
+
+			if ( nodes.length === 0 && objects.length === 1 ) {
+
+				object = objects[ 0 ];
+
+			} else {
+
+				object = ( type === 'JOINT' ) ? new THREE.Bone() : new THREE.Group();
+
+				for ( var i = 0; i < objects.length; i ++ ) {
+
+					object.add( objects[ i ] );
+
+				}
+
+			}
+
+			if ( object.name === '' ) {
+
+				object.name = ( type === 'JOINT' ) ? data.sid : data.name;
+
+			}
+
+			object.matrix.copy( matrix );
+			object.matrix.decompose( object.position, object.quaternion, object.scale );
+
+			return object;
+
+		}
+
+		function resolveMaterialBinding( keys, instanceMaterials ) {
+
+			var materials = [];
+
+			for ( var i = 0, l = keys.length; i < l; i ++ ) {
+
+				var id = instanceMaterials[ keys[ i ] ];
+				materials.push( getMaterial( id ) );
+
+			}
+
+			return materials;
+
+		}
+
+		function buildObjects( geometries, instanceMaterials ) {
+
+			var objects = [];
+
+			for ( var type in geometries ) {
+
+				var geometry = geometries[ type ];
+
+				var materials = resolveMaterialBinding( geometry.materialKeys, instanceMaterials );
+
+				// handle case if no materials are defined
+
+				if ( materials.length === 0 ) {
+
+					if ( type === 'lines' || type === 'linestrips' ) {
+
+						materials.push( new THREE.LineBasicMaterial() );
+
+					} else {
+
+						materials.push( new THREE.MeshPhongMaterial() );
+
+					}
+
+				}
+
+				// regard skinning
+
+				var skinning = ( geometry.data.attributes.skinIndex !== undefined );
+
+				if ( skinning ) {
+
+					for ( var i = 0, l = materials.length; i < l; i ++ ) {
+
+						materials[ i ].skinning = true;
+
+					}
+
+				}
+
+				// choose between a single or multi materials (material array)
+
+				var material = ( materials.length === 1 ) ? materials[ 0 ] : materials;
+
+				// now create a specific 3D object
+
+				var object;
+
+				switch ( type ) {
+
+					case 'lines':
+						object = new THREE.LineSegments( geometry.data, material );
+						break;
+
+					case 'linestrips':
+						object = new THREE.Line( geometry.data, material );
+						break;
+
+					case 'triangles':
+					case 'polylist':
+						if ( skinning ) {
+
+							object = new THREE.SkinnedMesh( geometry.data, material );
+
+						} else {
+
+							object = new THREE.Mesh( geometry.data, material );
+
+						}
+						break;
+
+				}
+
+				objects.push( object );
+
+			}
+
+			return objects;
+
+		}
+
+		function hasNode( id ) {
+
+			return library.nodes[ id ] !== undefined;
+
+		}
+
+		function getNode( id ) {
+
+			return getBuild( library.nodes[ id ], buildNode );
+
+		}
+
+		// visual scenes
+
+		function parseVisualScene( xml ) {
+
+			var data = {
+				name: xml.getAttribute( 'name' ),
+				children: []
+			};
+
+			prepareNodes( xml );
+
+			var elements = getElementsByTagName( xml, 'node' );
+
+			for ( var i = 0; i < elements.length; i ++ ) {
+
+				data.children.push( parseNode( elements[ i ] ) );
+
+			}
+
+			library.visualScenes[ xml.getAttribute( 'id' ) ] = data;
+
+		}
+
+		function buildVisualScene( data ) {
+
+			var group = new THREE.Group();
+			group.name = data.name;
+
+			var children = data.children;
+
+			for ( var i = 0; i < children.length; i ++ ) {
+
+				var child = children[ i ];
+
+				group.add( getNode( child.id ) );
+
+			}
+
+			return group;
+
+		}
+
+		function hasVisualScene( id ) {
+
+			return library.visualScenes[ id ] !== undefined;
+
+		}
+
+		function getVisualScene( id ) {
+
+			return getBuild( library.visualScenes[ id ], buildVisualScene );
+
+		}
+
+		// scenes
+
+		function parseScene( xml ) {
+
+			var instance = getElementsByTagName( xml, 'instance_visual_scene' )[ 0 ];
+			return getVisualScene( parseId( instance.getAttribute( 'url' ) ) );
+
+		}
+
+		function setupAnimations() {
+
+			var clips = library.clips;
+
+			if ( isEmpty( clips ) === true ) {
+
+				if ( isEmpty( library.animations ) === false ) {
+
+					// if there are animations but no clips, we create a default clip for playback
+
+					var tracks = [];
+
+					for ( var id in library.animations ) {
+
+						var animationTracks = getAnimation( id );
+
+						for ( var i = 0, l = animationTracks.length; i < l; i ++ ) {
+
+							tracks.push( animationTracks[ i ] );
+
+						}
+
+					}
+
+					animations.push( new THREE.AnimationClip( 'default', - 1, tracks ) );
+
+				}
+
+			} else {
+
+				for ( var id in clips ) {
+
+					animations.push( getAnimationClip( id ) );
+
+				}
+
+			}
+
+		}
+
+		if ( text.length === 0 ) {
+
+			return { scene: new THREE.Scene() };
+
+		}
+
+		var xml = new DOMParser().parseFromString( text, 'application/xml' );
+
+		var collada = getElementsByTagName( xml, 'COLLADA' )[ 0 ];
+
+		// metadata
+
+		var version = collada.getAttribute( 'version' );
+		console.log( 'THREE.ColladaLoader: File version', version );
+
+		var asset = parseAsset( getElementsByTagName( collada, 'asset' )[ 0 ] );
+		var textureLoader = new THREE.TextureLoader( this.manager );
+		textureLoader.setPath( path ).setCrossOrigin( this.crossOrigin );
+
+		//
+
+		var animations = [];
+		var kinematics = {};
+		var count = 0;
+
+		//
+
+		var library = {
+			animations: {},
+			clips: {},
+			controllers: {},
+			images: {},
+			effects: {},
+			materials: {},
+			cameras: {},
+			lights: {},
+			geometries: {},
+			nodes: {},
+			visualScenes: {},
+			kinematicsModels: {},
+			physicsModels: {},
+			kinematicsScenes: {}
+		};
+
+		parseLibrary( collada, 'library_animations', 'animation', parseAnimation );
+		parseLibrary( collada, 'library_animation_clips', 'animation_clip', parseAnimationClip );
+		parseLibrary( collada, 'library_controllers', 'controller', parseController );
+		parseLibrary( collada, 'library_images', 'image', parseImage );
+		parseLibrary( collada, 'library_effects', 'effect', parseEffect );
+		parseLibrary( collada, 'library_materials', 'material', parseMaterial );
+		parseLibrary( collada, 'library_cameras', 'camera', parseCamera );
+		parseLibrary( collada, 'library_lights', 'light', parseLight );
+		parseLibrary( collada, 'library_geometries', 'geometry', parseGeometry );
+		parseLibrary( collada, 'library_nodes', 'node', parseNode );
+		parseLibrary( collada, 'library_visual_scenes', 'visual_scene', parseVisualScene );
+		parseLibrary( collada, 'library_kinematics_models', 'kinematics_model', parseKinematicsModel );
+		parseLibrary( collada, 'library_physics_models', 'physics_model', parsePhysicsModel );
+		parseLibrary( collada, 'scene', 'instance_kinematics_scene', parseKinematicsScene );
+
+		buildLibrary( library.animations, buildAnimation );
+		buildLibrary( library.clips, buildAnimationClip );
+		buildLibrary( library.controllers, buildController );
+		buildLibrary( library.images, buildImage );
+		buildLibrary( library.effects, buildEffect );
+		buildLibrary( library.materials, buildMaterial );
+		buildLibrary( library.cameras, buildCamera );
+		buildLibrary( library.lights, buildLight );
+		buildLibrary( library.geometries, buildGeometry );
+		buildLibrary( library.visualScenes, buildVisualScene );
+
+		setupAnimations();
+		setupKinematics();
+
+		var scene = parseScene( getElementsByTagName( collada, 'scene' )[ 0 ] );
+
+		if ( asset.upAxis === 'Z_UP' ) {
+
+			scene.quaternion.setFromEuler( new THREE.Euler( - Math.PI / 2, 0, 0 ) );
+
+		}
+
+		scene.scale.multiplyScalar( asset.unit );
+
+		return {
+			animations: animations,
+			kinematics: kinematics,
+			library: library,
+			scene: scene
+		};
+
+	}
+
+};
+
+ return THREE.ColladaLoader;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('ColladaLoader',["three", "vendor/three/loaders/ColladaLoader", "lodash"], function( THREE, ThreeColladaLoader, _ ){
+    var ColladaLoader = function ()
+    {
+        ThreeColladaLoader.call( this );
+    };
+
+    ColladaLoader.prototype = _.create( ThreeColladaLoader.prototype, {
+        constructor : ColladaLoader,
+        
+        load : function(url, onLoad, onProgress, onError)
+        {
+            var scope = this;
+            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
+            
+            onLoad = onLoad || function(){};
+            
+            if( url === null || url === undefined || url === "" ) {
+                onLoad( null );
+            };
+
+            require(["text!" + url], function ( responseText ) {
+                
+                var fnc = onLoad || function(){};
+                fnc ( scope.parse( responseText, path ) );
+                
+            }, onError);
+        }
+        
+    });
+
+    return ColladaLoader;
+});
+
+
+define('LoaderSupport',["three"], function(THREE){
+/**
+  * @author Kai Salmen / https://kaisalmen.de
+  * Development repository: https://github.com/kaisalmen/WWOBJLoader
+  */
+
+
+
+if ( THREE.LoaderSupport === undefined ) { THREE.LoaderSupport = {} }
+
+/**
+ * Validation functions.
+ * @class
+ */
+THREE.LoaderSupport.Validator = {
+	/**
+	 * If given input is null or undefined, false is returned otherwise true.
+	 *
+	 * @param input Can be anything
+	 * @returns {boolean}
+	 */
+	isValid: function( input ) {
+		return ( input !== null && input !== undefined );
+	},
+	/**
+	 * If given input is null or undefined, the defaultValue is returned otherwise the given input.
+	 *
+	 * @param input Can be anything
+	 * @param defaultValue Can be anything
+	 * @returns {*}
+	 */
+	verifyInput: function( input, defaultValue ) {
+		return ( input === null || input === undefined ) ? defaultValue : input;
+	}
+};
+
+
+/**
+ * Callbacks utilized by loaders and builders.
+ * @class
+ */
+THREE.LoaderSupport.Callbacks = (function () {
+
+	var Validator = THREE.LoaderSupport.Validator;
+
+	function Callbacks() {
+		this.onProgress = null;
+		this.onMeshAlter = null;
+		this.onLoad = null;
+		this.onLoadMaterials = null;
+	}
+
+	/**
+	 * Register callback function that is invoked by internal function "announceProgress" to print feedback.
+	 * @memberOf THREE.LoaderSupport.Callbacks
+	 *
+	 * @param {callback} callbackOnProgress Callback function for described functionality
+	 */
+	Callbacks.prototype.setCallbackOnProgress = function ( callbackOnProgress ) {
+		this.onProgress = Validator.verifyInput( callbackOnProgress, this.onProgress );
+	};
+
+	/**
+	 * Register callback function that is called every time a mesh was loaded.
+	 * Use {@link THREE.LoaderSupport.LoadedMeshUserOverride} for alteration instructions (geometry, material or disregard mesh).
+	 * @memberOf THREE.LoaderSupport.Callbacks
+	 *
+	 * @param {callback} callbackOnMeshAlter Callback function for described functionality
+	 */
+	Callbacks.prototype.setCallbackOnMeshAlter = function ( callbackOnMeshAlter ) {
+		this.onMeshAlter = Validator.verifyInput( callbackOnMeshAlter, this.onMeshAlter );
+	};
+
+	/**
+	 * Register callback function that is called once loading of the complete OBJ file is completed.
+	 * @memberOf THREE.LoaderSupport.Callbacks
+	 *
+	 * @param {callback} callbackOnLoad Callback function for described functionality
+	 */
+	Callbacks.prototype.setCallbackOnLoad = function ( callbackOnLoad ) {
+		this.onLoad = Validator.verifyInput( callbackOnLoad, this.onLoad );
+	};
+
+	/**
+	 * Register callback function that is called when materials have been loaded.
+	 * @memberOf THREE.LoaderSupport.Callbacks
+	 *
+	 * @param {callback} callbackOnLoadMaterials Callback function for described functionality
+	 */
+	Callbacks.prototype.setCallbackOnLoadMaterials = function ( callbackOnLoadMaterials ) {
+		this.onLoadMaterials = Validator.verifyInput( callbackOnLoadMaterials, this.onLoadMaterials );
+	};
+
+	return Callbacks;
+})();
+
+
+/**
+ * Object to return by callback onMeshAlter. Used to disregard a certain mesh or to return one to many meshes.
+ * @class
+ *
+ * @param {boolean} disregardMesh=false Tell implementation to completely disregard this mesh
+ * @param {boolean} disregardMesh=false Tell implementation that mesh(es) have been altered or added
+ */
+THREE.LoaderSupport.LoadedMeshUserOverride = (function () {
+
+	function LoadedMeshUserOverride( disregardMesh, alteredMesh ) {
+		this.disregardMesh = disregardMesh === true;
+		this.alteredMesh = alteredMesh === true;
+		this.meshes = [];
+	}
+
+	/**
+	 * Add a mesh created within callback.
+	 *
+	 * @memberOf THREE.OBJLoader2.LoadedMeshUserOverride
+	 *
+	 * @param {THREE.Mesh} mesh
+	 */
+	LoadedMeshUserOverride.prototype.addMesh = function ( mesh ) {
+		this.meshes.push( mesh );
+		this.alteredMesh = true;
+	};
+
+	/**
+	 * Answers if mesh shall be disregarded completely.
+	 *
+	 * @returns {boolean}
+	 */
+	LoadedMeshUserOverride.prototype.isDisregardMesh = function () {
+		return this.disregardMesh;
+	};
+
+	/**
+	 * Answers if new mesh(es) were created.
+	 *
+	 * @returns {boolean}
+	 */
+	LoadedMeshUserOverride.prototype.providesAlteredMeshes = function () {
+		return this.alteredMesh;
+	};
+
+	return LoadedMeshUserOverride;
+})();
+
+
+/**
+ * A resource description used by {@link THREE.LoaderSupport.PrepData} and others.
+ * @class
+ *
+ * @param {string} url URL to the file
+ * @param {string} extension The file extension (type)
+ */
+THREE.LoaderSupport.ResourceDescriptor = (function () {
+
+	var Validator = THREE.LoaderSupport.Validator;
+
+	function ResourceDescriptor( url, extension ) {
+		var urlParts = url.split( '/' );
+
+		if ( urlParts.length < 2 ) {
+
+			this.path = null;
+			this.name = url;
+			this.url = url;
+
+		} else {
+
+			this.path = Validator.verifyInput( urlParts.slice( 0, urlParts.length - 1).join( '/' ) + '/', null );
+			this.name = urlParts[ urlParts.length - 1 ];
+			this.url = url;
+
+		}
+		this.name = Validator.verifyInput( this.name, 'Unnamed_Resource' );
+		this.extension = Validator.verifyInput( extension, 'default' );
+		this.extension = this.extension.trim();
+		this.content = null;
+	}
+
+	/**
+	 * Set the content of this resource
+	 * @memberOf THREE.LoaderSupport.ResourceDescriptor
+	 *
+	 * @param {Object} content The file content as arraybuffer or text
+	 */
+	ResourceDescriptor.prototype.setContent = function ( content ) {
+		this.content = Validator.verifyInput( content, null );
+	};
+
+	return ResourceDescriptor;
+})();
+
+
+/**
+ * Configuration instructions to be used by run method.
+ * @class
+ */
+THREE.LoaderSupport.PrepData = (function () {
+
+	var Validator = THREE.LoaderSupport.Validator;
+
+	function PrepData( modelName ) {
+		this.logging = {
+			enabled: true,
+			debug: false
+		};
+		this.modelName = Validator.verifyInput( modelName, '' );
+		this.resources = [];
+		this.callbacks = new THREE.LoaderSupport.Callbacks();
+	}
+
+	/**
+	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
+	 * @memberOf THREE.LoaderSupport.PrepData
+	 *
+	 * @param {boolean} enabled True or false.
+	 * @param {boolean} debug True or false.
+	 */
+	PrepData.prototype.setLogging = function ( enabled, debug ) {
+		this.logging.enabled = enabled === true;
+		this.logging.debug = debug === true;
+	};
+
+	/**
+	 * Returns all callbacks as {@link THREE.LoaderSupport.Callbacks}
+	 * @memberOf THREE.LoaderSupport.PrepData
+	 *
+	 * @returns {THREE.LoaderSupport.Callbacks}
+	 */
+	PrepData.prototype.getCallbacks = function () {
+		return this.callbacks;
+	};
+
+	/**
+	 * Add a resource description.
+	 * @memberOf THREE.LoaderSupport.PrepData
+	 *
+	 * @param {THREE.LoaderSupport.ResourceDescriptor} Adds a {@link THREE.LoaderSupport.ResourceDescriptor}
+	 */
+	PrepData.prototype.addResource = function ( resource ) {
+		this.resources.push( resource );
+	};
+
+	/**
+	 * Clones this object and returns it afterwards. Callbacks and resources are not cloned deep (references!).
+	 * @memberOf THREE.LoaderSupport.PrepData
+	 *
+	 * @returns {@link THREE.LoaderSupport.PrepData}
+	 */
+	PrepData.prototype.clone = function () {
+		var clone = new THREE.LoaderSupport.PrepData( this.modelName );
+		clone.logging.enabled = this.logging.enabled;
+		clone.logging.debug = this.logging.debug;
+		clone.resources = this.resources;
+		clone.callbacks = this.callbacks;
+
+		var property, value;
+		for ( property in this ) {
+
+			value = this[ property ];
+			if ( ! clone.hasOwnProperty( property ) && typeof this[ property ] !== 'function' ) {
+
+				clone[ property ] = value;
+
+			}
+		}
+
+		return clone;
+	};
+
+
+	/**
+	 * Identify files or content of interest from an Array of {@link THREE.LoaderSupport.ResourceDescriptor}.
+	 * @memberOf THREE.LoaderSupport.PrepData
+	 *
+	 * @param {THREE.LoaderSupport.ResourceDescriptor[]} resources Array of {@link THREE.LoaderSupport.ResourceDescriptor}
+	 * @param Object fileDesc Object describing which resources are of interest (ext, type (string or UInt8Array) and ignore (boolean))
+	 * @returns {{}} Object with each "ext" and the corresponding {@link THREE.LoaderSupport.ResourceDescriptor}
+	 */
+	PrepData.prototype.checkResourceDescriptorFiles = function ( resources, fileDesc ) {
+		var resource, triple, i, found;
+		var result = {};
+
+		for ( var index in resources ) {
+
+			resource = resources[ index ];
+			found = false;
+			if ( ! Validator.isValid( resource.name ) ) continue;
+			if ( Validator.isValid( resource.content ) ) {
+
+				for ( i = 0; i < fileDesc.length && !found; i++ ) {
+
+					triple = fileDesc[ i ];
+					if ( resource.extension.toLowerCase() === triple.ext.toLowerCase() ) {
+
+						if ( triple.ignore ) {
+
+							found = true;
+
+						} else if ( triple.type === "ArrayBuffer" ) {
+
+							// fast-fail on bad type
+							if ( ! ( resource.content instanceof ArrayBuffer || resource.content instanceof Uint8Array ) ) throw 'Provided content is not of type ArrayBuffer! Aborting...';
+							result[ triple.ext ] = resource;
+							found = true;
+
+						} else if ( triple.type === "String" ) {
+
+							if ( ! ( typeof( resource.content ) === 'string' || resource.content instanceof String) ) throw 'Provided  content is not of type String! Aborting...';
+							result[ triple.ext ] = resource;
+							found = true;
+
+						}
+
+					}
+
+				}
+				if ( !found ) throw 'Unidentified resource "' + resource.name + '": ' + resource.url;
+
+			} else {
+
+				// fast-fail on bad type
+				if ( ! ( typeof( resource.name ) === 'string' || resource.name instanceof String ) ) throw 'Provided file is not properly defined! Aborting...';
+				for ( i = 0; i < fileDesc.length && !found; i++ ) {
+
+					triple = fileDesc[ i ];
+					if ( resource.extension.toLowerCase() === triple.ext.toLowerCase() ) {
+
+						if ( ! triple.ignore ) result[ triple.ext ] = resource;
+						found = true;
+
+					}
+
+				}
+				if ( !found ) throw 'Unidentified resource "' + resource.name + '": ' + resource.url;
+
+			}
+		}
+
+		return result;
+	};
+
+	return PrepData;
+})();
+
+/**
+ * Builds one or many THREE.Mesh from one raw set of Arraybuffers, materialGroup descriptions and further parameters.
+ * Supports vertex, vertexColor, normal, uv and index buffers.
+ * @class
+ */
+THREE.LoaderSupport.MeshBuilder = (function () {
+
+	var LOADER_MESH_BUILDER_VERSION = '1.2.1';
+
+	var Validator = THREE.LoaderSupport.Validator;
+
+	function MeshBuilder() {
+		console.info( 'Using THREE.LoaderSupport.MeshBuilder version: ' + LOADER_MESH_BUILDER_VERSION );
+		this.logging = {
+			enabled: true,
+			debug: false
+		};
+
+		this.callbacks = new THREE.LoaderSupport.Callbacks();
+		this.materials = [];
+	}
+
+	/**
+	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
+	 * @memberOf THREE.LoaderSupport.MeshBuilder
+	 *
+	 * @param {boolean} enabled True or false.
+	 * @param {boolean} debug True or false.
+	 */
+	MeshBuilder.prototype.setLogging = function ( enabled, debug ) {
+		this.logging.enabled = enabled === true;
+		this.logging.debug = debug === true;
+	};
+
+	/**
+	 * Initializes the MeshBuilder (currently only default material initialisation).
+	 * @memberOf THREE.LoaderSupport.MeshBuilder
+	 *
+	 */
+	MeshBuilder.prototype.init = function () {
+		var defaultMaterial = new THREE.MeshStandardMaterial( { color: 0xDCF1FF } );
+		defaultMaterial.name = 'defaultMaterial';
+
+		var defaultVertexColorMaterial = new THREE.MeshStandardMaterial( { color: 0xDCF1FF } );
+		defaultVertexColorMaterial.name = 'defaultVertexColorMaterial';
+		defaultVertexColorMaterial.vertexColors = THREE.VertexColors;
+
+		var defaultLineMaterial = new THREE.LineBasicMaterial();
+		defaultLineMaterial.name = 'defaultLineMaterial';
+
+		var defaultPointMaterial = new THREE.PointsMaterial( { size: 1 } );
+		defaultPointMaterial.name = 'defaultPointMaterial';
+
+		var runtimeMaterials = {};
+		runtimeMaterials[ defaultMaterial.name ] = defaultMaterial;
+		runtimeMaterials[ defaultVertexColorMaterial.name ] = defaultVertexColorMaterial;
+		runtimeMaterials[ defaultLineMaterial.name ] = defaultLineMaterial;
+		runtimeMaterials[ defaultPointMaterial.name ] = defaultPointMaterial;
+
+		this.updateMaterials(
+			{
+				cmd: 'materialData',
+				materials: {
+					materialCloneInstructions: null,
+					serializedMaterials: null,
+					runtimeMaterials: runtimeMaterials
+				}
+			}
+		);
+	};
+
+	/**
+	 * Set materials loaded by any supplier of an Array of {@link THREE.Material}.
+	 * @memberOf THREE.LoaderSupport.MeshBuilder
+	 *
+	 * @param {THREE.Material[]} materials Array of {@link THREE.Material}
+	 */
+	MeshBuilder.prototype.setMaterials = function ( materials ) {
+		var payload = {
+			cmd: 'materialData',
+			materials: {
+				materialCloneInstructions: null,
+				serializedMaterials: null,
+				runtimeMaterials: Validator.isValid( this.callbacks.onLoadMaterials ) ? this.callbacks.onLoadMaterials( materials ) : materials
+			}
+		};
+		this.updateMaterials( payload );
+	};
+
+	MeshBuilder.prototype._setCallbacks = function ( callbacks ) {
+		if ( Validator.isValid( callbacks.onProgress ) ) this.callbacks.setCallbackOnProgress( callbacks.onProgress );
+		if ( Validator.isValid( callbacks.onMeshAlter ) ) this.callbacks.setCallbackOnMeshAlter( callbacks.onMeshAlter );
+		if ( Validator.isValid( callbacks.onLoad ) ) this.callbacks.setCallbackOnLoad( callbacks.onLoad );
+		if ( Validator.isValid( callbacks.onLoadMaterials ) ) this.callbacks.setCallbackOnLoadMaterials( callbacks.onLoadMaterials );
+	};
+
+	/**
+	 * Delegates processing of the payload (mesh building or material update) to the corresponding functions (BW-compatibility).
+	 * @memberOf THREE.LoaderSupport.MeshBuilder
+	 *
+	 * @param {Object} payload Raw Mesh or Material descriptions.
+	 * @returns {THREE.Mesh[]} mesh Array of {@link THREE.Mesh} or null in case of material update
+	 */
+	MeshBuilder.prototype.processPayload = function ( payload ) {
+		if ( payload.cmd === 'meshData' ) {
+
+			return this.buildMeshes( payload );
+
+		} else if ( payload.cmd === 'materialData' ) {
+
+			this.updateMaterials( payload );
+			return null;
+
+		}
+	};
+
+	/**
+	 * Builds one or multiple meshes from the data described in the payload (buffers, params, material info).
+	 * @memberOf THREE.LoaderSupport.MeshBuilder
+	 *
+	 * @param {Object} meshPayload Raw mesh description (buffers, params, materials) used to build one to many meshes.
+	 * @returns {THREE.Mesh[]} mesh Array of {@link THREE.Mesh}
+	 */
+	MeshBuilder.prototype.buildMeshes = function ( meshPayload ) {
+		var meshName = meshPayload.params.meshName;
+
+		var bufferGeometry = new THREE.BufferGeometry();
+		bufferGeometry.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.vertices ), 3 ) );
+		if ( Validator.isValid( meshPayload.buffers.indices ) ) {
+
+			bufferGeometry.setIndex( new THREE.BufferAttribute( new Uint32Array( meshPayload.buffers.indices ), 1 ));
+
+		}
+		var haveVertexColors = Validator.isValid( meshPayload.buffers.colors );
+		if ( haveVertexColors ) {
+
+			bufferGeometry.addAttribute( 'color', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.colors ), 3 ) );
+
+		}
+		if ( Validator.isValid( meshPayload.buffers.normals ) ) {
+
+			bufferGeometry.addAttribute( 'normal', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.normals ), 3 ) );
+
+		} else {
+
+			bufferGeometry.computeVertexNormals();
+
+		}
+		if ( Validator.isValid( meshPayload.buffers.uvs ) ) {
+
+			bufferGeometry.addAttribute( 'uv', new THREE.BufferAttribute( new Float32Array( meshPayload.buffers.uvs ), 2 ) );
+
+		}
+
+		var material, materialName, key;
+		var materialNames = meshPayload.materials.materialNames;
+		var createMultiMaterial = meshPayload.materials.multiMaterial;
+		var multiMaterials = [];
+		for ( key in materialNames ) {
+
+			materialName = materialNames[ key ];
+			material = this.materials[ materialName ];
+			if ( createMultiMaterial ) multiMaterials.push( material );
+
+		}
+		if ( createMultiMaterial ) {
+
+			material = multiMaterials;
+			var materialGroups = meshPayload.materials.materialGroups;
+			var materialGroup;
+			for ( key in materialGroups ) {
+
+				materialGroup = materialGroups[ key ];
+				bufferGeometry.addGroup( materialGroup.start, materialGroup.count, materialGroup.index );
+
+			}
+
+		}
+
+		var meshes = [];
+		var mesh;
+		var callbackOnMeshAlter = this.callbacks.onMeshAlter;
+		var callbackOnMeshAlterResult;
+		var useOrgMesh = true;
+		var geometryType = Validator.verifyInput( meshPayload.geometryType, 0 );
+		if ( Validator.isValid( callbackOnMeshAlter ) ) {
+
+			callbackOnMeshAlterResult = callbackOnMeshAlter(
+				{
+					detail: {
+						meshName: meshName,
+						bufferGeometry: bufferGeometry,
+						material: material,
+						geometryType: geometryType
+					}
+				}
+			);
+			if ( Validator.isValid( callbackOnMeshAlterResult ) ) {
+
+				if ( callbackOnMeshAlterResult.isDisregardMesh() ) {
+
+					useOrgMesh = false;
+
+				} else if ( callbackOnMeshAlterResult.providesAlteredMeshes() ) {
+
+					for ( var i in callbackOnMeshAlterResult.meshes ) {
+
+						meshes.push( callbackOnMeshAlterResult.meshes[ i ] );
+
+					}
+					useOrgMesh = false;
+
+				}
+
+			}
+
+		}
+		if ( useOrgMesh ) {
+
+			if ( meshPayload.computeBoundingSphere ) bufferGeometry.computeBoundingSphere();
+			if ( geometryType === 0 ) {
+
+				mesh = new THREE.Mesh( bufferGeometry, material );
+
+			} else if ( geometryType === 1) {
+
+				mesh = new THREE.LineSegments( bufferGeometry, material );
+
+			} else {
+
+				mesh = new THREE.Points( bufferGeometry, material );
+
+			}
+			mesh.name = meshName;
+			meshes.push( mesh );
+
+		}
+
+		var progressMessage;
+		if ( Validator.isValid( meshes ) && meshes.length > 0 ) {
+
+			var meshNames = [];
+			for ( var i in meshes ) {
+
+				mesh = meshes[ i ];
+				meshNames[ i ] = mesh.name;
+
+			}
+			progressMessage = 'Adding mesh(es) (' + meshNames.length + ': ' + meshNames + ') from input mesh: ' + meshName;
+			progressMessage += ' (' + ( meshPayload.progress.numericalValue * 100 ).toFixed( 2 ) + '%)';
+
+		} else {
+
+			progressMessage = 'Not adding mesh: ' + meshName;
+			progressMessage += ' (' + ( meshPayload.progress.numericalValue * 100 ).toFixed( 2 ) + '%)';
+
+		}
+		var callbackOnProgress = this.callbacks.onProgress;
+		if ( Validator.isValid( callbackOnProgress ) ) {
+
+			var event = new CustomEvent( 'MeshBuilderEvent', {
+				detail: {
+					type: 'progress',
+					modelName: meshPayload.params.meshName,
+					text: progressMessage,
+					numericalValue: meshPayload.progress.numericalValue
+				}
+			} );
+			callbackOnProgress( event );
+
+		}
+
+		return meshes;
+	};
+
+	/**
+	 * Updates the materials with contained material objects (sync) or from alteration instructions (async).
+	 * @memberOf THREE.LoaderSupport.MeshBuilder
+	 *
+	 * @param {Object} materialPayload Material update instructions
+	 */
+	MeshBuilder.prototype.updateMaterials = function ( materialPayload ) {
+		var material, materialName;
+		var materialCloneInstructions = materialPayload.materials.materialCloneInstructions;
+		if ( Validator.isValid( materialCloneInstructions ) ) {
+
+			var materialNameOrg = materialCloneInstructions.materialNameOrg;
+			var materialOrg = this.materials[ materialNameOrg ];
+
+			if ( Validator.isValid( materialNameOrg ) ) {
+
+				material = materialOrg.clone();
+
+				materialName = materialCloneInstructions.materialName;
+				material.name = materialName;
+
+				var materialProperties = materialCloneInstructions.materialProperties;
+				for ( var key in materialProperties ) {
+
+					if ( material.hasOwnProperty( key ) && materialProperties.hasOwnProperty( key ) ) material[ key ] = materialProperties[ key ];
+
+				}
+				this.materials[ materialName ] = material;
+
+			} else {
+
+				console.warn( 'Requested material "' + materialNameOrg + '" is not available!' );
+
+			}
+		}
+
+		var materials = materialPayload.materials.serializedMaterials;
+		if ( Validator.isValid( materials ) && Object.keys( materials ).length > 0 ) {
+
+			var loader = new THREE.MaterialLoader();
+			var materialJson;
+			for ( materialName in materials ) {
+
+				materialJson = materials[ materialName ];
+				if ( Validator.isValid( materialJson ) ) {
+
+					material = loader.parse( materialJson );
+					if ( this.logging.enabled ) console.info( 'De-serialized material with name "' + materialName + '" will be added.' );
+					this.materials[ materialName ] = material;
+				}
+
+			}
+
+		}
+
+		materials = materialPayload.materials.runtimeMaterials;
+		if ( Validator.isValid( materials ) && Object.keys( materials ).length > 0 ) {
+
+			for ( materialName in materials ) {
+
+				material = materials[ materialName ];
+				if ( this.logging.enabled ) console.info( 'Material with name "' + materialName + '" will be added.' );
+				this.materials[ materialName ] = material;
+
+			}
+
+		}
+	};
+
+	/**
+	 * Returns the mapping object of material name and corresponding jsonified material.
+	 *
+	 * @returns {Object} Map of Materials in JSON representation
+	 */
+	MeshBuilder.prototype.getMaterialsJSON = function () {
+		var materialsJSON = {};
+		var material;
+		for ( var materialName in this.materials ) {
+
+			material = this.materials[ materialName ];
+			materialsJSON[ materialName ] = material.toJSON();
+		}
+
+		return materialsJSON;
+	};
+
+	/**
+	 * Returns the mapping object of material name and corresponding material.
+	 *
+	 * @returns {Object} Map of {@link THREE.Material}
+	 */
+	MeshBuilder.prototype.getMaterials = function () {
+		return this.materials;
+	};
+
+	return MeshBuilder;
+})();
+
+/**
+ * Default implementation of the WorkerRunner responsible for creation and configuration of the parser within the worker.
+ *
+ * @class
+ */
+THREE.LoaderSupport.WorkerRunnerRefImpl = (function () {
+
+	function WorkerRunnerRefImpl() {
+		var scope = this;
+		var scopedRunner = function( event ) {
+			scope.processMessage( event.data );
+		};
+		self.addEventListener( 'message', scopedRunner, false );
+	}
+
+	/**
+	 * Applies values from parameter object via set functions or via direct assignment.
+	 * @memberOf THREE.LoaderSupport.WorkerRunnerRefImpl
+	 *
+	 * @param {Object} parser The parser instance
+	 * @param {Object} params The parameter object
+	 */
+	WorkerRunnerRefImpl.prototype.applyProperties = function ( parser, params ) {
+		var property, funcName, values;
+		for ( property in params ) {
+			funcName = 'set' + property.substring( 0, 1 ).toLocaleUpperCase() + property.substring( 1 );
+			values = params[ property ];
+
+			if ( typeof parser[ funcName ] === 'function' ) {
+
+				parser[ funcName ]( values );
+
+			} else if ( parser.hasOwnProperty( property ) ) {
+
+				parser[ property ] = values;
+
+			}
+		}
+	};
+
+	/**
+	 * Configures the Parser implementation according the supplied configuration object.
+	 * @memberOf THREE.LoaderSupport.WorkerRunnerRefImpl
+	 *
+	 * @param {Object} payload Raw mesh description (buffers, params, materials) used to build one to many meshes.
+	 */
+	WorkerRunnerRefImpl.prototype.processMessage = function ( payload ) {
+		if ( payload.cmd === 'run' ) {
+
+			var callbacks = {
+				callbackMeshBuilder: function ( payload ) {
+					self.postMessage( payload );
+				},
+				callbackProgress: function ( text ) {
+					if ( payload.logging.enabled && payload.logging.debug ) console.debug( 'WorkerRunner: progress: ' + text );
+				}
+			};
+
+			// Parser is expected to be named as such
+			var parser = new Parser();
+			if ( typeof parser[ 'setLogging' ] === 'function' ) parser.setLogging( payload.logging.enabled, payload.logging.debug );
+			this.applyProperties( parser, payload.params );
+			this.applyProperties( parser, payload.materials );
+			this.applyProperties( parser, callbacks );
+			parser.workerScope = self;
+			parser.parse( payload.data.input, payload.data.options );
+
+			if ( payload.logging.enabled ) console.log( 'WorkerRunner: Run complete!' );
+
+			callbacks.callbackMeshBuilder( {
+				cmd: 'complete',
+				msg: 'WorkerRunner completed run.'
+			} );
+
+		} else {
+
+			console.error( 'WorkerRunner: Received unknown command: ' + payload.cmd );
+
+		}
+	};
+
+	return WorkerRunnerRefImpl;
+})();
+
+/**
+ * This class provides means to transform existing parser code into a web worker. It defines a simple communication protocol
+ * which allows to configure the worker and receive raw mesh data during execution.
+ * @class
+ */
+THREE.LoaderSupport.WorkerSupport = (function () {
+
+	var WORKER_SUPPORT_VERSION = '2.2.0';
+
+	var Validator = THREE.LoaderSupport.Validator;
+
+	var LoaderWorker = (function () {
+
+		function LoaderWorker() {
+			this._reset();
+		}
+
+		LoaderWorker.prototype._reset = function () {
+			this.logging = {
+				enabled: true,
+				debug: false
+			};
+			this.worker = null;
+			this.runnerImplName = null;
+			this.callbacks = {
+				meshBuilder: null,
+				onLoad: null
+			};
+			this.terminateRequested = false;
+			this.queuedMessage = null;
+			this.started = false;
+			this.forceCopy = false;
+		};
+
+		LoaderWorker.prototype.setLogging = function ( enabled, debug ) {
+			this.logging.enabled = enabled === true;
+			this.logging.debug = debug === true;
+		};
+
+		LoaderWorker.prototype.setForceCopy = function ( forceCopy ) {
+			this.forceCopy = forceCopy === true;
+		};
+
+		LoaderWorker.prototype.initWorker = function ( code, runnerImplName ) {
+			this.runnerImplName = runnerImplName;
+			var blob = new Blob( [ code ], { type: 'application/javascript' } );
+			this.worker = new Worker( window.URL.createObjectURL( blob ) );
+			this.worker.onmessage = this._receiveWorkerMessage;
+
+			// set referemce to this, then processing in worker scope within "_receiveWorkerMessage" can access members
+			this.worker.runtimeRef = this;
+
+			// process stored queuedMessage
+			this._postMessage();
+		};
+
+		/**
+		 * Executed in worker scope
+ 		 */
+		LoaderWorker.prototype._receiveWorkerMessage = function ( e ) {
+			var payload = e.data;
+			switch ( payload.cmd ) {
+				case 'meshData':
+				case 'materialData':
+				case 'imageData':
+					this.runtimeRef.callbacks.meshBuilder( payload );
+					break;
+
+				case 'complete':
+					this.runtimeRef.queuedMessage = null;
+					this.started = false;
+					this.runtimeRef.callbacks.onLoad( payload.msg );
+
+					if ( this.runtimeRef.terminateRequested ) {
+
+						if ( this.runtimeRef.logging.enabled ) console.info( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Run is complete. Terminating application on request!' );
+						this.runtimeRef._terminate();
+
+					}
+					break;
+
+				case 'error':
+					console.error( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Reported error: ' + payload.msg );
+					this.runtimeRef.queuedMessage = null;
+					this.started = false;
+					this.runtimeRef.callbacks.onLoad( payload.msg );
+
+					if ( this.runtimeRef.terminateRequested ) {
+
+						if ( this.runtimeRef.logging.enabled ) console.info( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Run reported error. Terminating application on request!' );
+						this.runtimeRef._terminate();
+
+					}
+					break;
+
+				default:
+					console.error( 'WorkerSupport [' + this.runtimeRef.runnerImplName + ']: Received unknown command: ' + payload.cmd );
+					break;
+
+			}
+		};
+
+		LoaderWorker.prototype.setCallbacks = function ( meshBuilder, onLoad ) {
+			this.callbacks.meshBuilder = Validator.verifyInput( meshBuilder, this.callbacks.meshBuilder );
+			this.callbacks.onLoad = Validator.verifyInput( onLoad, this.callbacks.onLoad );
+		};
+
+		LoaderWorker.prototype.run = function( payload ) {
+			if ( Validator.isValid( this.queuedMessage ) ) {
+
+				console.warn( 'Already processing message. Rejecting new run instruction' );
+				return;
+
+			} else {
+
+				this.queuedMessage = payload;
+				this.started = true;
+
+			}
+			if ( ! Validator.isValid( this.callbacks.meshBuilder ) ) throw 'Unable to run as no "MeshBuilder" callback is set.';
+			if ( ! Validator.isValid( this.callbacks.onLoad ) ) throw 'Unable to run as no "onLoad" callback is set.';
+			if ( payload.cmd !== 'run' ) payload.cmd = 'run';
+			if ( Validator.isValid( payload.logging ) ) {
+
+				payload.logging.enabled = payload.logging.enabled === true;
+				payload.logging.debug = payload.logging.debug === true;
+
+			} else {
+
+				payload.logging = {
+					enabled: true,
+					debug: false
+				}
+
+			}
+			this._postMessage();
+		};
+
+		LoaderWorker.prototype._postMessage = function () {
+			if ( Validator.isValid( this.queuedMessage ) && Validator.isValid( this.worker ) ) {
+
+				if ( this.queuedMessage.data.input instanceof ArrayBuffer ) {
+
+					var content;
+					if ( this.forceCopy ) {
+
+						content = this.queuedMessage.data.input.slice( 0 );
+
+					} else {
+
+						content = this.queuedMessage.data.input;
+
+					}
+					this.worker.postMessage( this.queuedMessage, [ content ] );
+
+				} else {
+
+					this.worker.postMessage( this.queuedMessage );
+
+				}
+
+			}
+		};
+
+		LoaderWorker.prototype.setTerminateRequested = function ( terminateRequested ) {
+			this.terminateRequested = terminateRequested === true;
+			if ( this.terminateRequested && Validator.isValid( this.worker ) && ! Validator.isValid( this.queuedMessage ) && this.started ) {
+
+				if ( this.logging.enabled ) console.info( 'Worker is terminated immediately as it is not running!' );
+				this._terminate();
+
+			}
+		};
+
+		LoaderWorker.prototype._terminate = function () {
+			this.worker.terminate();
+			this._reset();
+		};
+
+		return LoaderWorker;
+
+	})();
+
+	function WorkerSupport() {
+		console.info( 'Using THREE.LoaderSupport.WorkerSupport version: ' + WORKER_SUPPORT_VERSION );
+		this.logging = {
+			enabled: true,
+			debug: false
+		};
+
+		// check worker support first
+		if ( window.Worker === undefined ) throw "This browser does not support web workers!";
+		if ( window.Blob === undefined  ) throw "This browser does not support Blob!";
+		if ( typeof window.URL.createObjectURL !== 'function'  ) throw "This browser does not support Object creation from URL!";
+
+		this.loaderWorker = new LoaderWorker();
+	}
+
+	/**
+	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
+	 * @memberOf THREE.LoaderSupport.WorkerSupport
+	 *
+	 * @param {boolean} enabled True or false.
+	 * @param {boolean} debug True or false.
+	 */
+	WorkerSupport.prototype.setLogging = function ( enabled, debug ) {
+		this.logging.enabled = enabled === true;
+		this.logging.debug = debug === true;
+		this.loaderWorker.setLogging( this.logging.enabled, this.logging.debug );
+	};
+
+	/**
+	 * Forces all ArrayBuffers to be transferred to worker to be copied.
+	 * @memberOf THREE.LoaderSupport.WorkerSupport
+	 *
+	 * @param {boolean} forceWorkerDataCopy True or false.
+	 */
+	WorkerSupport.prototype.setForceWorkerDataCopy = function ( forceWorkerDataCopy ) {
+		this.loaderWorker.setForceCopy( forceWorkerDataCopy );
+	};
+
+	/**
+	 * Validate the status of worker code and the derived worker.
+	 * @memberOf THREE.LoaderSupport.WorkerSupport
+	 *
+	 * @param {Function} functionCodeBuilder Function that is invoked with funcBuildObject and funcBuildSingleton that allows stringification of objects and singletons.
+	 * @param {String} parserName Name of the Parser object
+	 * @param {String[]} libLocations URL of libraries that shall be added to worker code relative to libPath
+	 * @param {String} libPath Base path used for loading libraries
+	 * @param {THREE.LoaderSupport.WorkerRunnerRefImpl} runnerImpl The default worker parser wrapper implementation (communication and execution). An extended class could be passed here.
+	 */
+	WorkerSupport.prototype.validate = function ( functionCodeBuilder, parserName, libLocations, libPath, runnerImpl ) {
+		if ( Validator.isValid( this.loaderWorker.worker ) ) return;
+
+		if ( this.logging.enabled ) {
+
+			console.info( 'WorkerSupport: Building worker code...' );
+			console.time( 'buildWebWorkerCode' );
+
+		}
+		if ( Validator.isValid( runnerImpl ) ) {
+
+			if ( this.logging.enabled ) console.info( 'WorkerSupport: Using "' + runnerImpl.name + '" as Runner class for worker.' );
+
+		} else {
+
+			runnerImpl = THREE.LoaderSupport.WorkerRunnerRefImpl;
+			if ( this.logging.enabled ) console.info( 'WorkerSupport: Using DEFAULT "THREE.LoaderSupport.WorkerRunnerRefImpl" as Runner class for worker.' );
+
+		}
+
+		var userWorkerCode = functionCodeBuilder( buildObject, buildSingleton );
+		userWorkerCode += 'var Parser = '+ parserName +  ';\n\n';
+		userWorkerCode += buildSingleton( runnerImpl.name, runnerImpl );
+		userWorkerCode += 'new ' + runnerImpl.name + '();\n\n';
+
+		var scope = this;
+		if ( Validator.isValid( libLocations ) && libLocations.length > 0 ) {
+
+			var libsContent = '';
+			var loadAllLibraries = function ( path, locations ) {
+				if ( locations.length === 0 ) {
+
+					scope.loaderWorker.initWorker( libsContent + userWorkerCode, runnerImpl.name );
+					if ( scope.logging.enabled ) console.timeEnd( 'buildWebWorkerCode' );
+
+				} else {
+
+					var loadedLib = function ( contentAsString ) {
+						libsContent += contentAsString;
+						loadAllLibraries( path, locations );
+					};
+
+					var fileLoader = new THREE.FileLoader();
+					fileLoader.setPath( path );
+					fileLoader.setResponseType( 'text' );
+					fileLoader.load( locations[ 0 ], loadedLib );
+					locations.shift();
+
+				}
+			};
+			loadAllLibraries( libPath, libLocations );
+
+		} else {
+
+			this.loaderWorker.initWorker( userWorkerCode, runnerImpl.name );
+			if ( this.logging.enabled ) console.timeEnd( 'buildWebWorkerCode' );
+
+		}
+	};
+
+	/**
+	 * Specify functions that should be build when new raw mesh data becomes available and when the parser is finished.
+	 * @memberOf THREE.LoaderSupport.WorkerSupport
+	 *
+	 * @param {Function} meshBuilder The mesh builder function. Default is {@link THREE.LoaderSupport.MeshBuilder}.
+	 * @param {Function} onLoad The function that is called when parsing is complete.
+	 */
+	WorkerSupport.prototype.setCallbacks = function ( meshBuilder, onLoad ) {
+		this.loaderWorker.setCallbacks( meshBuilder, onLoad );
+	};
+
+	/**
+	 * Runs the parser with the provided configuration.
+	 * @memberOf THREE.LoaderSupport.WorkerSupport
+	 *
+	 * @param {Object} payload Raw mesh description (buffers, params, materials) used to build one to many meshes.
+	 */
+	WorkerSupport.prototype.run = function ( payload ) {
+		this.loaderWorker.run( payload );
+	};
+
+	/**
+	 * Request termination of worker once parser is finished.
+	 * @memberOf THREE.LoaderSupport.WorkerSupport
+	 *
+	 * @param {boolean} terminateRequested True or false.
+	 */
+	WorkerSupport.prototype.setTerminateRequested = function ( terminateRequested ) {
+		this.loaderWorker.setTerminateRequested( terminateRequested );
+	};
+
+	var buildObject = function ( fullName, object ) {
+		var objectString = fullName + ' = {\n';
+		var part;
+		for ( var name in object ) {
+
+			part = object[ name ];
+			if ( typeof( part ) === 'string' || part instanceof String ) {
+
+				part = part.replace( '\n', '\\n' );
+				part = part.replace( '\r', '\\r' );
+				objectString += '\t' + name + ': "' + part + '",\n';
+
+			} else if ( part instanceof Array ) {
+
+				objectString += '\t' + name + ': [' + part + '],\n';
+
+			} else if ( Number.isInteger( part ) ) {
+
+				objectString += '\t' + name + ': ' + part + ',\n';
+
+			} else if ( typeof part === 'function' ) {
+
+				objectString += '\t' + name + ': ' + part + ',\n';
+
+			}
+
+		}
+		objectString += '}\n\n';
+
+		return objectString;
+	};
+
+	var buildSingleton = function ( fullName, object, internalName, basePrototypeName, ignoreFunctions ) {
+		var objectString = '';
+		var objectName = ( Validator.isValid( internalName ) ) ? internalName : object.name;
+
+		var funcString, objectPart, constructorString;
+		ignoreFunctions = Validator.verifyInput( ignoreFunctions, [] );
+		for ( var name in object.prototype ) {
+
+			objectPart = object.prototype[ name ];
+			if ( name === 'constructor' ) {
+
+				funcString = objectPart.toString();
+				funcString = funcString.replace( 'function', '' );
+				constructorString = '\tfunction ' + objectName + funcString + ';\n\n';
+
+			} else if ( typeof objectPart === 'function' ) {
+
+				if ( ignoreFunctions.indexOf( name ) < 0 ) {
+
+					funcString = objectPart.toString();
+					objectString += '\t' + objectName + '.prototype.' + name + ' = ' + funcString + ';\n\n';
+
+				}
+
+			}
+
+		}
+		objectString += '\treturn ' + objectName + ';\n';
+		objectString += '})();\n\n';
+
+		var inheritanceBlock = '';
+		if ( Validator.isValid( basePrototypeName ) ) {
+
+			inheritanceBlock += '\n';
+			inheritanceBlock += objectName + '.prototype = Object.create( ' + basePrototypeName + '.prototype );\n';
+			inheritanceBlock += objectName + '.constructor = ' + objectName + ';\n';
+			inheritanceBlock += '\n';
+		}
+		if ( ! Validator.isValid( constructorString ) ) {
+
+			constructorString = fullName + ' = (function () {\n\n';
+			constructorString += inheritanceBlock + '\t' + object.prototype.constructor.toString() + '\n\n';
+			objectString = constructorString + objectString;
+
+		} else {
+
+			objectString = fullName + ' = (function () {\n\n' + inheritanceBlock + constructorString + objectString;
+
+		}
+
+		return objectString;
+	};
+
+	return WorkerSupport;
+
+})();
+
+/**
+ * Orchestrate loading of multiple OBJ files/data from an instruction queue with a configurable amount of workers (1-16).
+ * Workflow:
+ *   prepareWorkers
+ *   enqueueForRun
+ *   processQueue
+ *   tearDown (to force stop)
+ *
+ * @class
+ *
+ * @param {string} classDef Class definition to be used for construction
+ */
+THREE.LoaderSupport.WorkerDirector = (function () {
+
+	var LOADER_WORKER_DIRECTOR_VERSION = '2.2.1';
+
+	var Validator = THREE.LoaderSupport.Validator;
+
+	var MAX_WEB_WORKER = 16;
+	var MAX_QUEUE_SIZE = 8192;
+
+	function WorkerDirector( classDef ) {
+		console.info( 'Using THREE.LoaderSupport.WorkerDirector version: ' + LOADER_WORKER_DIRECTOR_VERSION );
+		this.logging = {
+			enabled: true,
+			debug: false
+		};
+
+		this.maxQueueSize = MAX_QUEUE_SIZE ;
+		this.maxWebWorkers = MAX_WEB_WORKER;
+		this.crossOrigin = null;
+
+		if ( ! Validator.isValid( classDef ) ) throw 'Provided invalid classDef: ' + classDef;
+
+		this.workerDescription = {
+			classDef: classDef,
+			globalCallbacks: {},
+			workerSupports: {},
+			forceWorkerDataCopy: true
+		};
+		this.objectsCompleted = 0;
+		this.instructionQueue = [];
+		this.instructionQueuePointer = 0;
+
+		this.callbackOnFinishedProcessing = null;
+	}
+
+	/**
+	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @param {boolean} enabled True or false.
+	 * @param {boolean} debug True or false.
+	 */
+	WorkerDirector.prototype.setLogging = function ( enabled, debug ) {
+		this.logging.enabled = enabled === true;
+		this.logging.debug = debug === true;
+	};
+
+	/**
+	 * Returns the maximum length of the instruction queue.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @returns {number}
+	 */
+	WorkerDirector.prototype.getMaxQueueSize = function () {
+		return this.maxQueueSize;
+	};
+
+	/**
+	 * Returns the maximum number of workers.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @returns {number}
+	 */
+	WorkerDirector.prototype.getMaxWebWorkers = function () {
+		return this.maxWebWorkers;
+	};
+
+	/**
+	 * Sets the CORS string to be used.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @param {string} crossOrigin CORS value
+	 */
+	WorkerDirector.prototype.setCrossOrigin = function ( crossOrigin ) {
+		this.crossOrigin = crossOrigin;
+	};
+
+	/**
+	 * Forces all ArrayBuffers to be transferred to worker to be copied.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @param {boolean} forceWorkerDataCopy True or false.
+	 */
+	WorkerDirector.prototype.setForceWorkerDataCopy = function ( forceWorkerDataCopy ) {
+		this.workerDescription.forceWorkerDataCopy = forceWorkerDataCopy === true;
+	};
+
+	/**
+	 * Create or destroy workers according limits. Set the name and register callbacks for dynamically created web workers.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @param {THREE.OBJLoader2.WWOBJLoader2.PrepDataCallbacks} globalCallbacks  Register global callbacks used by all web workers
+	 * @param {number} maxQueueSize Set the maximum size of the instruction queue (1-1024)
+	 * @param {number} maxWebWorkers Set the maximum amount of workers (1-16)
+	 */
+	WorkerDirector.prototype.prepareWorkers = function ( globalCallbacks, maxQueueSize, maxWebWorkers ) {
+		if ( Validator.isValid( globalCallbacks ) ) this.workerDescription.globalCallbacks = globalCallbacks;
+		this.maxQueueSize = Math.min( maxQueueSize, MAX_QUEUE_SIZE );
+		this.maxWebWorkers = Math.min( maxWebWorkers, MAX_WEB_WORKER );
+		this.maxWebWorkers = Math.min( this.maxWebWorkers, this.maxQueueSize );
+		this.objectsCompleted = 0;
+		this.instructionQueue = [];
+		this.instructionQueuePointer = 0;
+
+		for ( var instanceNo = 0; instanceNo < this.maxWebWorkers; instanceNo++ ) {
+
+			var workerSupport = new THREE.LoaderSupport.WorkerSupport();
+			workerSupport.setLogging( this.logging.enabled, this.logging.debug );
+			workerSupport.setForceWorkerDataCopy( this.workerDescription.forceWorkerDataCopy );
+			this.workerDescription.workerSupports[ instanceNo ] = {
+				instanceNo: instanceNo,
+				inUse: false,
+				terminateRequested: false,
+				workerSupport: workerSupport,
+				loader: null
+			};
+
+		}
+	};
+
+	/**
+	 * Store run instructions in internal instructionQueue.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @param {THREE.LoaderSupport.PrepData} prepData
+	 */
+	WorkerDirector.prototype.enqueueForRun = function ( prepData ) {
+		if ( this.instructionQueue.length < this.maxQueueSize ) {
+			this.instructionQueue.push( prepData );
+		}
+	};
+
+	/**
+	 * Returns if any workers are running.
+	 *
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 * @returns {boolean}
+	 */
+	WorkerDirector.prototype.isRunning = function () {
+		var wsKeys = Object.keys( this.workerDescription.workerSupports );
+		return ( ( this.instructionQueue.length > 0 && this.instructionQueuePointer < this.instructionQueue.length ) || wsKeys.length > 0 );
+	};
+
+	/**
+	 * Process the instructionQueue until it is depleted.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 */
+	WorkerDirector.prototype.processQueue = function () {
+		var prepData, supportDesc;
+		for ( var instanceNo in this.workerDescription.workerSupports ) {
+
+			supportDesc = this.workerDescription.workerSupports[ instanceNo ];
+			if ( ! supportDesc.inUse ) {
+
+				if ( this.instructionQueuePointer < this.instructionQueue.length ) {
+
+					prepData = this.instructionQueue[ this.instructionQueuePointer ];
+					this._kickWorkerRun( prepData, supportDesc );
+					this.instructionQueuePointer++;
+
+				} else {
+
+					this._deregister( supportDesc );
+
+				}
+
+			}
+
+		}
+
+		if ( ! this.isRunning() && this.callbackOnFinishedProcessing !== null ) {
+
+			this.callbackOnFinishedProcessing();
+			this.callbackOnFinishedProcessing = null;
+
+		}
+	};
+
+	WorkerDirector.prototype._kickWorkerRun = function( prepData, supportDesc ) {
+		supportDesc.inUse = true;
+		supportDesc.workerSupport.setTerminateRequested( supportDesc.terminateRequested );
+
+		if ( this.logging.enabled ) console.info( '\nAssigning next item from queue to worker (queue length: ' + this.instructionQueue.length + ')\n\n' );
+
+		var scope = this;
+		var prepDataCallbacks = prepData.getCallbacks();
+		var globalCallbacks = this.workerDescription.globalCallbacks;
+		var wrapperOnLoad = function ( event ) {
+			if ( Validator.isValid( globalCallbacks.onLoad ) ) globalCallbacks.onLoad( event );
+			if ( Validator.isValid( prepDataCallbacks.onLoad ) ) prepDataCallbacks.onLoad( event );
+			scope.objectsCompleted++;
+			supportDesc.inUse = false;
+
+			scope.processQueue();
+		};
+
+		var wrapperOnProgress = function ( event ) {
+			if ( Validator.isValid( globalCallbacks.onProgress ) ) globalCallbacks.onProgress( event );
+			if ( Validator.isValid( prepDataCallbacks.onProgress ) ) prepDataCallbacks.onProgress( event );
+		};
+
+		var wrapperOnMeshAlter = function ( event, override ) {
+			if ( Validator.isValid( globalCallbacks.onMeshAlter ) ) override = globalCallbacks.onMeshAlter( event, override );
+			if ( Validator.isValid( prepDataCallbacks.onMeshAlter ) ) override = globalCallbacks.onMeshAlter( event, override );
+			return override;
+		};
+
+		var wrapperOnLoadMaterials = function ( materials ) {
+			if ( Validator.isValid( globalCallbacks.onLoadMaterials ) ) materials = globalCallbacks.onLoadMaterials( materials );
+			if ( Validator.isValid( prepDataCallbacks.onLoadMaterials ) ) materials = prepDataCallbacks.onLoadMaterials( materials );
+			return materials;
+		};
+
+		supportDesc.loader = this._buildLoader( supportDesc.instanceNo );
+
+		var updatedCallbacks = new THREE.LoaderSupport.Callbacks();
+		updatedCallbacks.setCallbackOnLoad( wrapperOnLoad );
+		updatedCallbacks.setCallbackOnProgress( wrapperOnProgress );
+		updatedCallbacks.setCallbackOnMeshAlter( wrapperOnMeshAlter );
+		updatedCallbacks.setCallbackOnLoadMaterials( wrapperOnLoadMaterials );
+		prepData.callbacks = updatedCallbacks;
+
+		supportDesc.loader.run( prepData, supportDesc.workerSupport );
+	};
+
+	WorkerDirector.prototype._buildLoader = function ( instanceNo ) {
+		var classDef = this.workerDescription.classDef;
+		var loader = Object.create( classDef.prototype );
+		classDef.call( loader, THREE.DefaultLoadingManager );
+
+		// verify that all required functions are implemented
+		if ( ! loader.hasOwnProperty( 'instanceNo' ) ) throw classDef.name + ' has no property "instanceNo".';
+		loader.instanceNo = instanceNo;
+
+		if ( ! loader.hasOwnProperty( 'workerSupport' ) ) {
+
+			throw classDef.name + ' has no property "workerSupport".';
+
+		}
+		if ( typeof loader.run !== 'function'  ) throw classDef.name + ' has no function "run".';
+		if ( ! loader.hasOwnProperty( 'callbacks' ) || ! Validator.isValid( loader.callbacks ) ) {
+
+			console.warn( classDef.name + ' has an invalid property "callbacks". Will change to "THREE.LoaderSupport.Callbacks"' );
+			loader.callbacks = new THREE.LoaderSupport.Callbacks();
+
+		}
+
+		return loader;
+	};
+
+	WorkerDirector.prototype._deregister = function ( supportDesc ) {
+		if ( Validator.isValid( supportDesc ) ) {
+
+			supportDesc.workerSupport.setTerminateRequested( true );
+			if ( this.logging.enabled ) console.info( 'Requested termination of worker #' + supportDesc.instanceNo + '.' );
+
+			var loaderCallbacks = supportDesc.loader.callbacks;
+			if ( Validator.isValid( loaderCallbacks.onProgress ) ) loaderCallbacks.onProgress( { detail: { text: '' } } );
+			delete this.workerDescription.workerSupports[ supportDesc.instanceNo ];
+
+		}
+	};
+
+	/**
+	 * Terminate all workers.
+	 * @memberOf THREE.LoaderSupport.WorkerDirector
+	 *
+	 * @param {callback} callbackOnFinishedProcessing Function called once all workers finished processing.
+	 */
+	WorkerDirector.prototype.tearDown = function ( callbackOnFinishedProcessing ) {
+		if ( this.logging.enabled ) console.info( 'WorkerDirector received the deregister call. Terminating all workers!' );
+
+		this.instructionQueuePointer = this.instructionQueue.length;
+		this.callbackOnFinishedProcessing = Validator.verifyInput( callbackOnFinishedProcessing, null );
+
+		for ( var name in this.workerDescription.workerSupports ) {
+
+			this.workerDescription.workerSupports[ name ].terminateRequested = true;
+
+		}
+	};
+
+	return WorkerDirector;
+
+})();
+
+ return THREE.LoaderSupport;
+});
+define('vendor/three/loaders/OBJLoader2',["three", "LoaderSupport"], function(THREE, LoaderSupport){
+/**
+  * @author Kai Salmen / https://kaisalmen.de
+  * Development repository: https://github.com/kaisalmen/WWOBJLoader
+  */
+
+
+
+if ( THREE.OBJLoader2 === undefined ) { THREE.OBJLoader2 = {} }
+
+if ( THREE.LoaderSupport === undefined ) console.error( '"THREE.LoaderSupport" is not available. "THREE.OBJLoader2" requires it. Please include "LoaderSupport.js" in your HTML.' );
+
+/**
+ * Use this class to load OBJ data from files or to parse OBJ data from an arraybuffer
+ * @class
+ *
+ * @param {THREE.DefaultLoadingManager} [manager] The loadingManager for the loader to use. Default is {@link THREE.DefaultLoadingManager}
+ */
+THREE.OBJLoader2 = (function () {
+
+	var OBJLOADER2_VERSION = '2.4.1';
+	var Validator = THREE.LoaderSupport.Validator;
+
+	function OBJLoader2( manager ) {
+		console.info( 'Using THREE.OBJLoader2 version: ' + OBJLOADER2_VERSION );
+
+		this.manager = Validator.verifyInput( manager, THREE.DefaultLoadingManager );
+		this.logging = {
+			enabled: true,
+			debug: false
+		};
+
+		this.modelName = '';
+		this.instanceNo = 0;
+		this.path = '';
+		this.useIndices = false;
+		this.disregardNormals = false;
+		this.materialPerSmoothingGroup = false;
+		this.useOAsMesh = false;
+		this.loaderRootNode = new THREE.Group();
+
+		this.meshBuilder = new THREE.LoaderSupport.MeshBuilder();
+		this.callbacks = new THREE.LoaderSupport.Callbacks();
+		this.workerSupport = new THREE.LoaderSupport.WorkerSupport();
+		this.terminateWorkerOnLoad = true;
+	}
+
+	/**
+	 * Enable or disable logging in general (except warn and error), plus enable or disable debug logging.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {boolean} enabled True or false.
+	 * @param {boolean} debug True or false.
+	 */
+	OBJLoader2.prototype.setLogging = function ( enabled, debug ) {
+		this.logging.enabled = enabled === true;
+		this.logging.debug = debug === true;
+		this.meshBuilder.setLogging( this.logging.enabled, this.logging.debug );
+	};
+
+	/**
+	 * Set the name of the model.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {string} modelName
+	 */
+	OBJLoader2.prototype.setModelName = function ( modelName ) {
+		this.modelName = Validator.verifyInput( modelName, this.modelName );
+	};
+
+	/**
+	 * The URL of the base path.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {string} path URL
+	 */
+	OBJLoader2.prototype.setPath = function ( path ) {
+		this.path = Validator.verifyInput( path, this.path );
+	};
+
+	/**
+	 * Set the node where the loaded objects will be attached directly.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {THREE.Object3D} streamMeshesTo Object already attached to scenegraph where new meshes will be attached to
+	 */
+	OBJLoader2.prototype.setStreamMeshesTo = function ( streamMeshesTo ) {
+		this.loaderRootNode = Validator.verifyInput( streamMeshesTo, this.loaderRootNode );
+	};
+
+	/**
+	 * Set materials loaded by MTLLoader or any other supplier of an Array of {@link THREE.Material}.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {THREE.Material[]} materials Array of {@link THREE.Material}
+	 */
+	OBJLoader2.prototype.setMaterials = function ( materials ) {
+		this.meshBuilder.setMaterials( materials );
+	};
+
+	/**
+	 * Instructs loaders to create indexed {@link THREE.BufferGeometry}.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {boolean} useIndices=false
+	 */
+	OBJLoader2.prototype.setUseIndices = function ( useIndices ) {
+		this.useIndices = useIndices === true;
+	};
+
+	/**
+	 * Tells whether normals should be completely disregarded and regenerated.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {boolean} disregardNormals=false
+	 */
+	OBJLoader2.prototype.setDisregardNormals = function ( disregardNormals ) {
+		this.disregardNormals = disregardNormals === true;
+	};
+
+	/**
+	 * Tells whether a material shall be created per smoothing group.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {boolean} materialPerSmoothingGroup=false
+	 */
+	OBJLoader2.prototype.setMaterialPerSmoothingGroup = function ( materialPerSmoothingGroup ) {
+		this.materialPerSmoothingGroup = materialPerSmoothingGroup === true;
+	};
+
+	/**
+	 * Usually 'o' is meta-information and does not result in creation of new meshes, but mesh creation on occurrence of "o" can be enforced.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {boolean} useOAsMesh=false
+	 */
+	OBJLoader2.prototype.setUseOAsMesh = function ( useOAsMesh ) {
+		this.useOAsMesh = useOAsMesh === true;
+	};
+
+	OBJLoader2.prototype._setCallbacks = function ( callbacks ) {
+		if ( Validator.isValid( callbacks.onProgress ) ) this.callbacks.setCallbackOnProgress( callbacks.onProgress );
+		if ( Validator.isValid( callbacks.onMeshAlter ) ) this.callbacks.setCallbackOnMeshAlter( callbacks.onMeshAlter );
+		if ( Validator.isValid( callbacks.onLoad ) ) this.callbacks.setCallbackOnLoad( callbacks.onLoad );
+		if ( Validator.isValid( callbacks.onLoadMaterials ) ) this.callbacks.setCallbackOnLoadMaterials( callbacks.onLoadMaterials );
+
+		this.meshBuilder._setCallbacks( this.callbacks );
+	};
+
+	/**
+	 * Announce feedback which is give to the registered callbacks.
+	 * @memberOf THREE.OBJLoader2
+	 * @private
+	 *
+	 * @param {string} type The type of event
+	 * @param {string} text Textual description of the event
+	 * @param {number} numericalValue Numerical value describing the progress
+	 */
+	OBJLoader2.prototype.onProgress = function ( type, text, numericalValue ) {
+		var content = Validator.isValid( text ) ? text: '';
+		var event = {
+			detail: {
+				type: type,
+				modelName: this.modelName,
+				instanceNo: this.instanceNo,
+				text: content,
+				numericalValue: numericalValue
+			}
+		};
+
+		if ( Validator.isValid( this.callbacks.onProgress ) ) this.callbacks.onProgress( event );
+
+		if ( this.logging.enabled && this.logging.debug ) console.debug( content );
+	};
+
+	OBJLoader2.prototype._onError = function ( event ) {
+		var output = 'Error occurred while downloading!';
+
+		if ( event.currentTarget && event.currentTarget.statusText !== null ) {
+
+			output += '\nurl: ' + event.currentTarget.responseURL + '\nstatus: ' + event.currentTarget.statusText;
+
+		}
+		this.onProgress( 'error', output, -1 );
+		throw output;
+	};
+
+	/**
+	 * Use this convenient method to load a file at the given URL. By default the fileLoader uses an ArrayBuffer.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {string}  url A string containing the path/URL of the file to be loaded.
+	 * @param {callback} onLoad A function to be called after loading is successfully completed. The function receives loaded Object3D as an argument.
+	 * @param {callback} [onProgress] A function to be called while the loading is in progress. The argument will be the XMLHttpRequest instance, which contains total and Integer bytes.
+	 * @param {callback} [onError] A function to be called if an error occurs during loading. The function receives the error as an argument.
+	 * @param {callback} [onMeshAlter] A function to be called after a new mesh raw data becomes available for alteration.
+	 * @param {boolean} [useAsync] If true, uses async loading with worker, if false loads data synchronously.
+	 */
+	OBJLoader2.prototype.load = function ( url, onLoad, onProgress, onError, onMeshAlter, useAsync ) {
+		var resource = new THREE.LoaderSupport.ResourceDescriptor( url, 'OBJ' );
+		this._loadObj( resource, onLoad, onProgress, onError, onMeshAlter, useAsync );
+	};
+
+	OBJLoader2.prototype._loadObj = function ( resource, onLoad, onProgress, onError, onMeshAlter, useAsync ) {
+		if ( ! Validator.isValid( onError ) ) onError = this._onError;
+
+		// fast-fail
+		if ( ! Validator.isValid( resource ) ) onError( 'An invalid ResourceDescriptor was provided. Unable to continue!' );
+		var scope = this;
+		var fileLoaderOnLoad = function ( content ) {
+
+			resource.content = content;
+			if ( useAsync ) {
+
+				scope.parseAsync( content, onLoad );
+
+			} else {
+
+				var callbacks = new THREE.LoaderSupport.Callbacks();
+				callbacks.setCallbackOnMeshAlter( onMeshAlter );
+				scope._setCallbacks( callbacks );
+				onLoad(
+					{
+						detail: {
+							loaderRootNode: scope.parse( content ),
+							modelName: scope.modelName,
+							instanceNo: scope.instanceNo
+						}
+					}
+				);
+
+			}
+		};
+
+		// fast-fail
+		if ( ! Validator.isValid( resource.url ) || Validator.isValid( resource.content ) ) {
+
+			fileLoaderOnLoad( Validator.isValid( resource.content ) ? resource.content : null );
+
+		} else {
+
+			if ( ! Validator.isValid( onProgress ) ) {
+				var numericalValueRef = 0;
+				var numericalValue = 0;
+				onProgress = function ( event ) {
+					if ( ! event.lengthComputable ) return;
+
+					numericalValue = event.loaded / event.total;
+					if ( numericalValue > numericalValueRef ) {
+
+						numericalValueRef = numericalValue;
+						var output = 'Download of "' + resource.url + '": ' + ( numericalValue * 100 ).toFixed( 2 ) + '%';
+						scope.onProgress( 'progressLoad', output, numericalValue );
+
+					}
+				};
+			}
+
+
+			var fileLoader = new THREE.FileLoader( this.manager );
+			fileLoader.setPath( this.path );
+			fileLoader.setResponseType( 'arraybuffer' );
+			fileLoader.load( resource.url, fileLoaderOnLoad, onProgress, onError );
+
+		}
+	};
+
+
+	/**
+	 * Run the loader according the provided instructions.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {THREE.LoaderSupport.PrepData} prepData All parameters and resources required for execution
+	 * @param {THREE.LoaderSupport.WorkerSupport} [workerSupportExternal] Use pre-existing WorkerSupport
+	 */
+	OBJLoader2.prototype.run = function ( prepData, workerSupportExternal ) {
+		this._applyPrepData( prepData );
+		var available = prepData.checkResourceDescriptorFiles( prepData.resources,
+			[
+				{ ext: "obj", type: "ArrayBuffer", ignore: false },
+				{ ext: "mtl", type: "String", ignore: false },
+				{ ext: "zip", type: "String", ignore: true }
+			]
+		);
+		if ( Validator.isValid( workerSupportExternal ) ) {
+
+			this.terminateWorkerOnLoad = false;
+			this.workerSupport = workerSupportExternal;
+			this.logging.enabled = this.workerSupport.logging.enabled;
+			this.logging.debug = this.workerSupport.logging.debug;
+
+		}
+		var scope = this;
+		var onMaterialsLoaded = function ( materials ) {
+			if ( materials !== null ) scope.meshBuilder.setMaterials( materials );
+			scope._loadObj( available.obj, scope.callbacks.onLoad, null, null, scope.callbacks.onMeshAlter, prepData.useAsync );
+
+		};
+		this._loadMtl( available.mtl, onMaterialsLoaded, prepData.crossOrigin, prepData.materialOptions );
+	};
+
+	OBJLoader2.prototype._applyPrepData = function ( prepData ) {
+		if ( Validator.isValid( prepData ) ) {
+
+			this.setLogging( prepData.logging.enabled, prepData.logging.debug );
+			this.setModelName( prepData.modelName );
+			this.setStreamMeshesTo( prepData.streamMeshesTo );
+			this.meshBuilder.setMaterials( prepData.materials );
+			this.setUseIndices( prepData.useIndices );
+			this.setDisregardNormals( prepData.disregardNormals );
+			this.setMaterialPerSmoothingGroup( prepData.materialPerSmoothingGroup );
+			this.setUseOAsMesh( prepData.useOAsMesh );
+
+			this._setCallbacks( prepData.getCallbacks() );
+
+		}
+	};
+
+	/**
+	 * Parses OBJ data synchronously from arraybuffer or string.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {arraybuffer|string} content OBJ data as Uint8Array or String
+	 */
+	OBJLoader2.prototype.parse = function ( content ) {
+		// fast-fail in case of illegal data
+		if ( ! Validator.isValid( content ) ) {
+
+			console.warn( 'Provided content is not a valid ArrayBuffer or String.' );
+			return this.loaderRootNode;
+
+		}
+		if ( this.logging.enabled ) console.time( 'OBJLoader2 parse: ' + this.modelName );
+		this.meshBuilder.init();
+
+		var parser = new Parser();
+		parser.setLogging( this.logging.enabled, this.logging.debug );
+		parser.setMaterialPerSmoothingGroup( this.materialPerSmoothingGroup );
+		parser.setUseOAsMesh( this.useOAsMesh );
+		parser.setUseIndices( this.useIndices );
+		parser.setDisregardNormals( this.disregardNormals );
+		// sync code works directly on the material references
+		parser.setMaterials( this.meshBuilder.getMaterials() );
+
+		var scope = this;
+		var onMeshLoaded = function ( payload ) {
+			var meshes = scope.meshBuilder.processPayload( payload );
+			var mesh;
+			for ( var i in meshes ) {
+				mesh = meshes[ i ];
+				scope.loaderRootNode.add( mesh );
+			}
+		};
+		parser.setCallbackMeshBuilder( onMeshLoaded );
+		var onProgressScoped = function ( text, numericalValue ) {
+			scope.onProgress( 'progressParse', text, numericalValue );
+		};
+		parser.setCallbackProgress( onProgressScoped );
+
+		if ( content instanceof ArrayBuffer || content instanceof Uint8Array ) {
+
+			if ( this.logging.enabled ) console.info( 'Parsing arrayBuffer...' );
+			parser.parse( content );
+
+		} else if ( typeof( content ) === 'string' || content instanceof String ) {
+
+			if ( this.logging.enabled ) console.info( 'Parsing text...' );
+			parser.parseText( content );
+
+		} else {
+
+			throw 'Provided content was neither of type String nor Uint8Array! Aborting...';
+
+		}
+		if ( this.logging.enabled ) console.timeEnd( 'OBJLoader2 parse: ' + this.modelName );
+
+		return this.loaderRootNode;
+	};
+
+	/**
+	 * Parses OBJ content asynchronously from arraybuffer.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {arraybuffer} content OBJ data as Uint8Array
+	 * @param {callback} onLoad Called after worker successfully completed loading
+	 */
+	OBJLoader2.prototype.parseAsync = function ( content, onLoad ) {
+		var scope = this;
+		var measureTime = false;
+		var scopedOnLoad = function () {
+			onLoad(
+				{
+					detail: {
+						loaderRootNode: scope.loaderRootNode,
+						modelName: scope.modelName,
+						instanceNo: scope.instanceNo
+					}
+				}
+			);
+			if ( measureTime && scope.logging.enabled ) console.timeEnd( 'OBJLoader2 parseAsync: ' + scope.modelName );
+		};
+		// fast-fail in case of illegal data
+		if ( ! Validator.isValid( content ) ) {
+
+			console.warn( 'Provided content is not a valid ArrayBuffer.' );
+			scopedOnLoad()
+
+		} else {
+
+			measureTime = true;
+
+		}
+		if ( measureTime && this.logging.enabled ) console.time( 'OBJLoader2 parseAsync: ' + this.modelName );
+		this.meshBuilder.init();
+
+		var scopedOnMeshLoaded = function ( payload ) {
+			var meshes = scope.meshBuilder.processPayload( payload );
+			var mesh;
+			for ( var i in meshes ) {
+				mesh = meshes[ i ];
+				scope.loaderRootNode.add( mesh );
+			}
+		};
+		var buildCode = function ( funcBuildObject, funcBuildSingleton ) {
+			var workerCode = '';
+			workerCode += '/**\n';
+			workerCode += '  * This code was constructed by OBJLoader2 buildCode.\n';
+			workerCode += '  */\n\n';
+			workerCode += 'THREE = { LoaderSupport: {} };\n\n';
+			workerCode += funcBuildObject( 'THREE.LoaderSupport.Validator', Validator );
+			workerCode += funcBuildSingleton( 'Parser', Parser );
+
+			return workerCode;
+		};
+		this.workerSupport.validate( buildCode, 'Parser' );
+		this.workerSupport.setCallbacks( scopedOnMeshLoaded, scopedOnLoad );
+		if ( scope.terminateWorkerOnLoad ) this.workerSupport.setTerminateRequested( true );
+
+		var materialNames = {};
+		var materials = this.meshBuilder.getMaterials();
+		for ( var materialName in materials ) {
+
+			materialNames[ materialName ] = materialName;
+
+		}
+		this.workerSupport.run(
+			{
+				params: {
+					useAsync: true,
+					materialPerSmoothingGroup: this.materialPerSmoothingGroup,
+					useOAsMesh: this.useOAsMesh,
+					useIndices: this.useIndices,
+					disregardNormals: this.disregardNormals
+				},
+				logging: {
+					enabled: this.logging.enabled,
+					debug: this.logging.debug
+				},
+				materials: {
+					// in async case only material names are supplied to parser
+					materials: materialNames
+				},
+				data: {
+					input: content,
+					options: null
+				}
+			}
+		);
+	};
+
+
+	/**
+	 * Parse OBJ data either from ArrayBuffer or string
+	 * @class
+	 */
+	var Parser = (function () {
+
+		function Parser() {
+			this.callbackProgress = null;
+			this.callbackMeshBuilder = null;
+			this.contentRef = null;
+			this.legacyMode = false;
+
+			this.materials = {};
+			this.useAsync = false;
+			this.materialPerSmoothingGroup = false;
+			this.useOAsMesh = false;
+			this.useIndices = false;
+			this.disregardNormals = false;
+
+			this.vertices = [];
+			this.colors = [];
+			this.normals = [];
+			this.uvs = [];
+
+			this.rawMesh = {
+				objectName: '',
+				groupName: '',
+				activeMtlName: '',
+				mtllibName: '',
+
+				// reset with new mesh
+				faceType: -1,
+				subGroups: [],
+				subGroupInUse: null,
+				smoothingGroup: {
+					splitMaterials: false,
+					normalized: -1,
+					real: -1
+				},
+				counts: {
+					doubleIndicesCount: 0,
+					faceCount: 0,
+					mtlCount: 0,
+					smoothingGroupCount: 0
+				}
+			};
+
+			this.inputObjectCount = 1;
+			this.outputObjectCount = 1;
+			this.globalCounts = {
+				vertices: 0,
+				faces: 0,
+				doubleIndicesCount: 0,
+				lineByte: 0,
+				currentByte: 0,
+				totalBytes: 0
+			};
+
+			this.logging = {
+				enabled: true,
+				debug: false
+			};
+		}
+
+		Parser.prototype.resetRawMesh = function () {
+			// faces are stored according combined index of group, material and smoothingGroup (0 or not)
+			this.rawMesh.subGroups = [];
+			this.rawMesh.subGroupInUse = null;
+			this.rawMesh.smoothingGroup.normalized = -1;
+			this.rawMesh.smoothingGroup.real = -1;
+
+			// this default index is required as it is possible to define faces without 'g' or 'usemtl'
+			this.pushSmoothingGroup( 1 );
+
+			this.rawMesh.counts.doubleIndicesCount = 0;
+			this.rawMesh.counts.faceCount = 0;
+			this.rawMesh.counts.mtlCount = 0;
+			this.rawMesh.counts.smoothingGroupCount = 0;
+		};
+
+		Parser.prototype.setUseAsync = function ( useAsync ) {
+			this.useAsync = useAsync;
+		};
+
+		Parser.prototype.setMaterialPerSmoothingGroup = function ( materialPerSmoothingGroup ) {
+			this.materialPerSmoothingGroup = materialPerSmoothingGroup;
+		};
+
+		Parser.prototype.setUseOAsMesh = function ( useOAsMesh ) {
+			this.useOAsMesh = useOAsMesh;
+		};
+
+		Parser.prototype.setUseIndices = function ( useIndices ) {
+			this.useIndices = useIndices;
+		};
+
+		Parser.prototype.setDisregardNormals = function ( disregardNormals ) {
+			this.disregardNormals = disregardNormals;
+		};
+
+		Parser.prototype.setMaterials = function ( materials ) {
+			this.materials = THREE.LoaderSupport.Validator.verifyInput( materials, this.materials );
+			this.materials = THREE.LoaderSupport.Validator.verifyInput( this.materials, {} );
+		};
+
+		Parser.prototype.setCallbackMeshBuilder = function ( callbackMeshBuilder ) {
+			if ( ! THREE.LoaderSupport.Validator.isValid( callbackMeshBuilder ) ) throw 'Unable to run as no "MeshBuilder" callback is set.';
+			this.callbackMeshBuilder = callbackMeshBuilder;
+		};
+
+		Parser.prototype.setCallbackProgress = function ( callbackProgress ) {
+			this.callbackProgress = callbackProgress;
+		};
+
+		Parser.prototype.setLogging = function ( enabled, debug ) {
+			this.logging.enabled = enabled === true;
+			this.logging.debug = debug === true;
+		};
+
+		Parser.prototype.configure = function () {
+			this.pushSmoothingGroup( 1 );
+
+			if ( this.logging.enabled ) {
+
+				var matKeys = Object.keys( this.materials );
+				var matNames = ( matKeys.length > 0 ) ? '\n\tmaterialNames:\n\t\t- ' + matKeys.join( '\n\t\t- ' ) : '\n\tmaterialNames: None';
+				var printedConfig = 'OBJLoader2.Parser configuration:'
+					+ matNames
+					+ '\n\tuseAsync: ' + this.useAsync
+					+ '\n\tmaterialPerSmoothingGroup: ' + this.materialPerSmoothingGroup
+					+ '\n\tuseOAsMesh: ' + this.useOAsMesh
+					+ '\n\tuseIndices: ' + this.useIndices
+					+ '\n\tdisregardNormals: ' + this.disregardNormals
+					+ '\n\tcallbackMeshBuilderName: ' + this.callbackMeshBuilder.name
+					+ '\n\tcallbackProgressName: ' + this.callbackProgress.name;
+				console.info( printedConfig );
+			}
+		};
+
+		/**
+		 * Parse the provided arraybuffer
+		 * @memberOf Parser
+		 *
+		 * @param {Uint8Array} arrayBuffer OBJ data as Uint8Array
+		 */
+		Parser.prototype.parse = function ( arrayBuffer ) {
+			if ( this.logging.enabled ) console.time( 'OBJLoader2.Parser.parse' );
+			this.configure();
+
+			var arrayBufferView = new Uint8Array( arrayBuffer );
+			this.contentRef = arrayBufferView;
+			var length = arrayBufferView.byteLength;
+			this.globalCounts.totalBytes = length;
+			var buffer = new Array( 128 );
+
+			for ( var code, word = '', bufferPointer = 0, slashesCount = 0, i = 0; i < length; i++ ) {
+
+				code = arrayBufferView[ i ];
+				switch ( code ) {
+					// space
+					case 32:
+						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
+						word = '';
+						break;
+					// slash
+					case 47:
+						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
+						slashesCount++;
+						word = '';
+						break;
+
+					// LF
+					case 10:
+						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
+						word = '';
+						this.globalCounts.lineByte = this.globalCounts.currentByte;
+						this.globalCounts.currentByte = i;
+						this.processLine( buffer, bufferPointer, slashesCount );
+						bufferPointer = 0;
+						slashesCount = 0;
+						break;
+
+					// CR
+					case 13:
+						break;
+
+					default:
+						word += String.fromCharCode( code );
+						break;
+				}
+			}
+			this.finalizeParsing();
+			if ( this.logging.enabled ) console.timeEnd(  'OBJLoader2.Parser.parse' );
+		};
+
+		/**
+		 * Parse the provided text
+		 * @memberOf Parser
+		 *
+		 * @param {string} text OBJ data as string
+		 */
+		Parser.prototype.parseText = function ( text ) {
+			if ( this.logging.enabled ) console.time(  'OBJLoader2.Parser.parseText' );
+			this.configure();
+			this.legacyMode = true;
+			this.contentRef = text;
+			var length = text.length;
+			this.globalCounts.totalBytes = length;
+			var buffer = new Array( 128 );
+
+			for ( var char, word = '', bufferPointer = 0, slashesCount = 0, i = 0; i < length; i++ ) {
+
+				char = text[ i ];
+				switch ( char ) {
+					case ' ':
+						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
+						word = '';
+						break;
+
+					case '/':
+						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
+						slashesCount++;
+						word = '';
+						break;
+
+					case '\n':
+						if ( word.length > 0 ) buffer[ bufferPointer++ ] = word;
+						word = '';
+						this.globalCounts.lineByte = this.globalCounts.currentByte;
+						this.globalCounts.currentByte = i;
+						this.processLine( buffer, bufferPointer, slashesCount );
+						bufferPointer = 0;
+						slashesCount = 0;
+						break;
+
+					case '\r':
+						break;
+
+					default:
+						word += char;
+				}
+			}
+			this.finalizeParsing();
+			if ( this.logging.enabled ) console.timeEnd( 'OBJLoader2.Parser.parseText' );
+		};
+
+		Parser.prototype.processLine = function ( buffer, bufferPointer, slashesCount ) {
+			if ( bufferPointer < 1 ) return;
+
+			var reconstructString = function ( content, legacyMode, start, stop ) {
+				var line = '';
+				if ( stop > start ) {
+
+					var i;
+					if ( legacyMode ) {
+
+						for ( i = start; i < stop; i++ ) line += content[ i ];
+
+					} else {
+
+
+						for ( i = start; i < stop; i++ ) line += String.fromCharCode( content[ i ] );
+
+					}
+					line = line.trim();
+
+				}
+				return line;
+			};
+
+			var bufferLength, length, i, lineDesignation;
+			lineDesignation = buffer [ 0 ];
+			switch ( lineDesignation ) {
+				case 'v':
+					this.vertices.push( parseFloat( buffer[ 1 ] ) );
+					this.vertices.push( parseFloat( buffer[ 2 ] ) );
+					this.vertices.push( parseFloat( buffer[ 3 ] ) );
+					if ( bufferPointer > 4 ) {
+
+						this.colors.push( parseFloat( buffer[ 4 ] ) );
+						this.colors.push( parseFloat( buffer[ 5 ] ) );
+						this.colors.push( parseFloat( buffer[ 6 ] ) );
+
+					}
+					break;
+
+				case 'vt':
+					this.uvs.push( parseFloat( buffer[ 1 ] ) );
+					this.uvs.push( parseFloat( buffer[ 2 ] ) );
+					break;
+
+				case 'vn':
+					this.normals.push( parseFloat( buffer[ 1 ] ) );
+					this.normals.push( parseFloat( buffer[ 2 ] ) );
+					this.normals.push( parseFloat( buffer[ 3 ] ) );
+					break;
+
+				case 'f':
+					bufferLength = bufferPointer - 1;
+
+					// "f vertex ..."
+					if ( slashesCount === 0 ) {
+
+						this.checkFaceType( 0 );
+						for ( i = 2, length = bufferLength; i < length; i ++ ) {
+
+							this.buildFace( buffer[ 1 ] );
+							this.buildFace( buffer[ i ] );
+							this.buildFace( buffer[ i + 1 ] );
+
+						}
+
+					// "f vertex/uv ..."
+					} else if  ( bufferLength === slashesCount * 2 ) {
+
+						this.checkFaceType( 1 );
+						for ( i = 3, length = bufferLength - 2; i < length; i += 2 ) {
+
+							this.buildFace( buffer[ 1 ], buffer[ 2 ] );
+							this.buildFace( buffer[ i ], buffer[ i + 1 ] );
+							this.buildFace( buffer[ i + 2 ], buffer[ i + 3 ] );
+
+						}
+
+					// "f vertex/uv/normal ..."
+					} else if  ( bufferLength * 2 === slashesCount * 3 ) {
+
+						this.checkFaceType( 2 );
+						for ( i = 4, length = bufferLength - 3; i < length; i += 3 ) {
+
+							this.buildFace( buffer[ 1 ], buffer[ 2 ], buffer[ 3 ] );
+							this.buildFace( buffer[ i ], buffer[ i + 1 ], buffer[ i + 2 ] );
+							this.buildFace( buffer[ i + 3 ], buffer[ i + 4 ], buffer[ i + 5 ] );
+
+						}
+
+					// "f vertex//normal ..."
+					} else {
+
+						this.checkFaceType( 3 );
+						for ( i = 3, length = bufferLength - 2; i < length; i += 2 ) {
+
+							this.buildFace( buffer[ 1 ], undefined, buffer[ 2 ] );
+							this.buildFace( buffer[ i ], undefined, buffer[ i + 1 ] );
+							this.buildFace( buffer[ i + 2 ], undefined, buffer[ i + 3 ] );
+
+						}
+
+					}
+					break;
+
+				case 'l':
+				case 'p':
+					bufferLength = bufferPointer - 1;
+					if ( bufferLength === slashesCount * 2 )  {
+
+						this.checkFaceType( 4 );
+						for ( i = 1, length = bufferLength + 1; i < length; i += 2 ) this.buildFace( buffer[ i ], buffer[ i + 1 ] );
+
+					} else {
+
+						this.checkFaceType( ( lineDesignation === 'l' ) ? 5 : 6  );
+						for ( i = 1, length = bufferLength + 1; i < length; i ++ ) this.buildFace( buffer[ i ] );
+
+					}
+					break;
+
+				case 's':
+					this.pushSmoothingGroup( buffer[ 1 ] );
+					break;
+
+				case 'g':
+					// 'g' leads to creation of mesh if valid data (faces declaration was done before), otherwise only groupName gets set
+					this.processCompletedMesh();
+					this.rawMesh.groupName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 2, this.globalCounts.currentByte );
+					break;
+
+				case 'o':
+					// 'o' is meta-information and usually does not result in creation of new meshes, but can be enforced with "useOAsMesh"
+					if ( this.useOAsMesh ) this.processCompletedMesh();
+					this.rawMesh.objectName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 2, this.globalCounts.currentByte );
+					break;
+
+				case 'mtllib':
+					this.rawMesh.mtllibName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 7, this.globalCounts.currentByte );
+					break;
+
+				case 'usemtl':
+					var mtlName = reconstructString( this.contentRef, this.legacyMode, this.globalCounts.lineByte + 7, this.globalCounts.currentByte );
+					if ( mtlName !== '' && this.rawMesh.activeMtlName !== mtlName ) {
+
+						this.rawMesh.activeMtlName = mtlName;
+						this.rawMesh.counts.mtlCount++;
+						this.checkSubGroup();
+
+					}
+					break;
+
+				default:
+					break;
+			}
+		};
+
+		Parser.prototype.pushSmoothingGroup = function ( smoothingGroup ) {
+			var smoothingGroupInt = parseInt( smoothingGroup );
+			if ( isNaN( smoothingGroupInt ) ) {
+				smoothingGroupInt = smoothingGroup === "off" ? 0 : 1;
+			}
+
+			var smoothCheck = this.rawMesh.smoothingGroup.normalized;
+			this.rawMesh.smoothingGroup.normalized = this.rawMesh.smoothingGroup.splitMaterials ? smoothingGroupInt : ( smoothingGroupInt === 0 ) ? 0 : 1;
+			this.rawMesh.smoothingGroup.real = smoothingGroupInt;
+
+			if ( smoothCheck !== smoothingGroupInt ) {
+
+				this.rawMesh.counts.smoothingGroupCount++;
+				this.checkSubGroup();
+
+			}
+		};
+
+		/**
+		 * Expanded faceTypes include all four face types, both line types and the point type
+		 * faceType = 0: "f vertex ..."
+		 * faceType = 1: "f vertex/uv ..."
+		 * faceType = 2: "f vertex/uv/normal ..."
+		 * faceType = 3: "f vertex//normal ..."
+		 * faceType = 4: "l vertex/uv ..." or "l vertex ..."
+		 * faceType = 5: "l vertex ..."
+		 * faceType = 6: "p vertex ..."
+		 */
+		Parser.prototype.checkFaceType = function ( faceType ) {
+			if ( this.rawMesh.faceType !== faceType ) {
+
+				this.processCompletedMesh();
+				this.rawMesh.faceType = faceType;
+				this.checkSubGroup();
+
+			}
+		};
+
+		Parser.prototype.checkSubGroup = function () {
+			var index = this.rawMesh.activeMtlName + '|' + this.rawMesh.smoothingGroup.normalized;
+			this.rawMesh.subGroupInUse = this.rawMesh.subGroups[ index ];
+
+			if ( ! THREE.LoaderSupport.Validator.isValid( this.rawMesh.subGroupInUse ) ) {
+
+				this.rawMesh.subGroupInUse = {
+					index: index,
+					objectName: this.rawMesh.objectName,
+					groupName: this.rawMesh.groupName,
+					materialName: this.rawMesh.activeMtlName,
+					smoothingGroup: this.rawMesh.smoothingGroup.normalized,
+					vertices: [],
+					indexMappingsCount: 0,
+					indexMappings: [],
+					indices: [],
+					colors: [],
+					uvs: [],
+					normals: []
+				};
+				this.rawMesh.subGroups[ index ] = this.rawMesh.subGroupInUse;
+
+			}
+		};
+
+		Parser.prototype.buildFace = function ( faceIndexV, faceIndexU, faceIndexN ) {
+			if ( this.disregardNormals ) faceIndexN = undefined;
+			var scope = this;
+			var updateSubGroupInUse = function () {
+
+				var faceIndexVi = parseInt( faceIndexV );
+				var indexPointerV = 3 * ( faceIndexVi > 0 ? faceIndexVi - 1 : faceIndexVi + scope.vertices.length / 3 );
+
+				var vertices = scope.rawMesh.subGroupInUse.vertices;
+				vertices.push( scope.vertices[ indexPointerV++ ] );
+				vertices.push( scope.vertices[ indexPointerV++ ] );
+				vertices.push( scope.vertices[ indexPointerV ] );
+
+				var indexPointerC = scope.colors.length > 0 ? indexPointerV + 1 : null;
+				if ( indexPointerC !== null ) {
+
+					var colors = scope.rawMesh.subGroupInUse.colors;
+					colors.push( scope.colors[ indexPointerC++ ] );
+					colors.push( scope.colors[ indexPointerC++ ] );
+					colors.push( scope.colors[ indexPointerC ] );
+
+				}
+				if ( faceIndexU ) {
+
+					var faceIndexUi = parseInt( faceIndexU );
+					var indexPointerU = 2 * ( faceIndexUi > 0 ? faceIndexUi - 1 : faceIndexUi + scope.uvs.length / 2 );
+					var uvs = scope.rawMesh.subGroupInUse.uvs;
+					uvs.push( scope.uvs[ indexPointerU++ ] );
+					uvs.push( scope.uvs[ indexPointerU ] );
+
+				}
+				if ( faceIndexN ) {
+
+					var faceIndexNi = parseInt( faceIndexN );
+					var indexPointerN = 3 * ( faceIndexNi > 0 ? faceIndexNi - 1 : faceIndexNi + scope.normals.length / 3 );
+					var normals = scope.rawMesh.subGroupInUse.normals;
+					normals.push( scope.normals[ indexPointerN++ ] );
+					normals.push( scope.normals[ indexPointerN++ ] );
+					normals.push( scope.normals[ indexPointerN ] );
+
+				}
+			};
+
+			if ( this.useIndices ) {
+
+				var mappingName = faceIndexV + ( faceIndexU ? '_' + faceIndexU : '_n' ) + ( faceIndexN ? '_' + faceIndexN : '_n' );
+				var indicesPointer = this.rawMesh.subGroupInUse.indexMappings[ mappingName ];
+				if ( THREE.LoaderSupport.Validator.isValid( indicesPointer ) ) {
+
+					this.rawMesh.counts.doubleIndicesCount++;
+
+				} else {
+
+					indicesPointer = this.rawMesh.subGroupInUse.vertices.length / 3;
+					updateSubGroupInUse();
+					this.rawMesh.subGroupInUse.indexMappings[ mappingName ] = indicesPointer;
+					this.rawMesh.subGroupInUse.indexMappingsCount++;
+
+				}
+				this.rawMesh.subGroupInUse.indices.push( indicesPointer );
+
+			} else {
+
+				updateSubGroupInUse();
+
+			}
+			this.rawMesh.counts.faceCount++;
+		};
+
+		Parser.prototype.createRawMeshReport = function ( inputObjectCount ) {
+			return 'Input Object number: ' + inputObjectCount +
+				'\n\tObject name: ' + this.rawMesh.objectName +
+				'\n\tGroup name: ' + this.rawMesh.groupName +
+				'\n\tMtllib name: ' + this.rawMesh.mtllibName +
+				'\n\tVertex count: ' + this.vertices.length / 3 +
+				'\n\tNormal count: ' + this.normals.length / 3 +
+				'\n\tUV count: ' + this.uvs.length / 2 +
+				'\n\tSmoothingGroup count: ' + this.rawMesh.counts.smoothingGroupCount +
+				'\n\tMaterial count: ' + this.rawMesh.counts.mtlCount +
+				'\n\tReal MeshOutputGroup count: ' + this.rawMesh.subGroups.length;
+		};
+
+		/**
+		 * Clear any empty subGroup and calculate absolute vertex, normal and uv counts
+		 */
+		Parser.prototype.finalizeRawMesh = function () {
+			var meshOutputGroupTemp = [];
+			var meshOutputGroup;
+			var absoluteVertexCount = 0;
+			var absoluteIndexMappingsCount = 0;
+			var absoluteIndexCount = 0;
+			var absoluteColorCount = 0;
+			var absoluteNormalCount = 0;
+			var absoluteUvCount = 0;
+			var indices;
+			for ( var name in this.rawMesh.subGroups ) {
+
+				meshOutputGroup = this.rawMesh.subGroups[ name ];
+				if ( meshOutputGroup.vertices.length > 0 ) {
+
+					indices = meshOutputGroup.indices;
+					if ( indices.length > 0 && absoluteIndexMappingsCount > 0 ) {
+
+						for ( var i in indices ) indices[ i ] = indices[ i ] + absoluteIndexMappingsCount;
+
+					}
+					meshOutputGroupTemp.push( meshOutputGroup );
+					absoluteVertexCount += meshOutputGroup.vertices.length;
+					absoluteIndexMappingsCount += meshOutputGroup.indexMappingsCount;
+					absoluteIndexCount += meshOutputGroup.indices.length;
+					absoluteColorCount += meshOutputGroup.colors.length;
+					absoluteUvCount += meshOutputGroup.uvs.length;
+					absoluteNormalCount += meshOutputGroup.normals.length;
+
+				}
+			}
+
+			// do not continue if no result
+			var result = null;
+			if ( meshOutputGroupTemp.length > 0 ) {
+
+				result = {
+					name: this.rawMesh.groupName !== '' ? this.rawMesh.groupName : this.rawMesh.objectName,
+					subGroups: meshOutputGroupTemp,
+					absoluteVertexCount: absoluteVertexCount,
+					absoluteIndexCount: absoluteIndexCount,
+					absoluteColorCount: absoluteColorCount,
+					absoluteNormalCount: absoluteNormalCount,
+					absoluteUvCount: absoluteUvCount,
+					faceCount: this.rawMesh.counts.faceCount,
+					doubleIndicesCount: this.rawMesh.counts.doubleIndicesCount
+				};
+
+			}
+			return result;
+		};
+
+		Parser.prototype.processCompletedMesh = function () {
+			var result = this.finalizeRawMesh();
+			if ( THREE.LoaderSupport.Validator.isValid( result ) ) {
+
+				if ( this.colors.length > 0 && this.colors.length !== this.vertices.length ) {
+
+					throw 'Vertex Colors were detected, but vertex count and color count do not match!';
+
+				}
+				if ( this.logging.enabled && this.logging.debug ) console.debug( this.createRawMeshReport( this.inputObjectCount ) );
+				this.inputObjectCount++;
+
+				this.buildMesh( result );
+				var progressBytesPercent = this.globalCounts.currentByte / this.globalCounts.totalBytes;
+				this.callbackProgress( 'Completed [o: ' + this.rawMesh.objectName + ' g:' + this.rawMesh.groupName + '] Total progress: ' + ( progressBytesPercent * 100 ).toFixed( 2 ) + '%', progressBytesPercent );
+				this.resetRawMesh();
+				return true;
+
+			} else {
+
+				return false;
+			}
+		};
+
+		/**
+		 * SubGroups are transformed to too intermediate format that is forwarded to the MeshBuilder.
+		 * It is ensured that SubGroups only contain objects with vertices (no need to check).
+		 *
+		 * @param result
+		 */
+		Parser.prototype.buildMesh = function ( result ) {
+			var meshOutputGroups = result.subGroups;
+
+			var vertexFA = new Float32Array( result.absoluteVertexCount );
+			this.globalCounts.vertices += result.absoluteVertexCount / 3;
+			this.globalCounts.faces += result.faceCount;
+			this.globalCounts.doubleIndicesCount += result.doubleIndicesCount;
+			var indexUA = ( result.absoluteIndexCount > 0 ) ? new Uint32Array( result.absoluteIndexCount ) : null;
+			var colorFA = ( result.absoluteColorCount > 0 ) ? new Float32Array( result.absoluteColorCount ) : null;
+			var normalFA = ( result.absoluteNormalCount > 0 ) ? new Float32Array( result.absoluteNormalCount ) : null;
+			var uvFA = ( result.absoluteUvCount > 0 ) ? new Float32Array( result.absoluteUvCount ) : null;
+			var haveVertexColors = THREE.LoaderSupport.Validator.isValid( colorFA );
+
+			var meshOutputGroup;
+			var materialNames = [];
+
+			var createMultiMaterial = ( meshOutputGroups.length > 1 );
+			var materialIndex = 0;
+			var materialIndexMapping = [];
+			var selectedMaterialIndex;
+			var materialGroup;
+			var materialGroups = [];
+
+			var vertexFAOffset = 0;
+			var indexUAOffset = 0;
+			var colorFAOffset = 0;
+			var normalFAOffset = 0;
+			var uvFAOffset = 0;
+			var materialGroupOffset = 0;
+			var materialGroupLength = 0;
+
+			var materialOrg, material, materialName, materialNameOrg;
+			// only one specific face type
+			for ( var oodIndex in meshOutputGroups ) {
+
+				if ( ! meshOutputGroups.hasOwnProperty( oodIndex ) ) continue;
+				meshOutputGroup = meshOutputGroups[ oodIndex ];
+
+				materialNameOrg = meshOutputGroup.materialName;
+				if ( this.rawMesh.faceType < 4 ) {
+
+					materialName = materialNameOrg + ( haveVertexColors ? '_vertexColor' : '' ) + ( meshOutputGroup.smoothingGroup === 0 ? '_flat' : '' );
+
+
+				} else {
+
+					materialName = this.rawMesh.faceType === 6 ? 'defaultPointMaterial' : 'defaultLineMaterial';
+
+				}
+				materialOrg = this.materials[ materialNameOrg ];
+				material = this.materials[ materialName ];
+
+				// both original and derived names do not lead to an existing material => need to use a default material
+				if ( ! THREE.LoaderSupport.Validator.isValid( materialOrg ) && ! THREE.LoaderSupport.Validator.isValid( material ) ) {
+
+					var defaultMaterialName = haveVertexColors ? 'defaultVertexColorMaterial' : 'defaultMaterial';
+					materialOrg = this.materials[ defaultMaterialName ];
+					if ( this.logging.enabled ) console.warn( 'object_group "' + meshOutputGroup.objectName + '_' +
+						meshOutputGroup.groupName + '" was defined with unresolvable material "' +
+						materialNameOrg + '"! Assigning "' + defaultMaterialName + '".' );
+					materialNameOrg = defaultMaterialName;
+
+					// if names are identical then there is no need for later manipulation
+					if ( materialNameOrg === materialName ) {
+
+						material = materialOrg;
+						materialName = defaultMaterialName;
+
+					}
+
+				}
+				if ( ! THREE.LoaderSupport.Validator.isValid( material ) ) {
+
+					var materialCloneInstructions = {
+						materialNameOrg: materialNameOrg,
+						materialName: materialName,
+						materialProperties: {
+							vertexColors: haveVertexColors ? 2 : 0,
+							flatShading: meshOutputGroup.smoothingGroup === 0
+						}
+					};
+					var payload = {
+						cmd: 'materialData',
+						materials: {
+							materialCloneInstructions: materialCloneInstructions
+						}
+					};
+					this.callbackMeshBuilder( payload );
+
+					// fake entry for async; sync Parser always works on material references (Builder update directly visible here)
+					if ( this.useAsync ) this.materials[ materialName ] = materialCloneInstructions;
+
+				}
+
+				if ( createMultiMaterial ) {
+
+					// re-use material if already used before. Reduces materials array size and eliminates duplicates
+					selectedMaterialIndex = materialIndexMapping[ materialName ];
+					if ( ! selectedMaterialIndex ) {
+
+						selectedMaterialIndex = materialIndex;
+						materialIndexMapping[ materialName ] = materialIndex;
+						materialNames.push( materialName );
+						materialIndex++;
+
+					}
+					materialGroupLength = this.useIndices ? meshOutputGroup.indices.length : meshOutputGroup.vertices.length / 3;
+					materialGroup = {
+						start: materialGroupOffset,
+						count: materialGroupLength,
+						index: selectedMaterialIndex
+					};
+					materialGroups.push( materialGroup );
+					materialGroupOffset += materialGroupLength;
+
+				} else {
+
+					materialNames.push( materialName );
+
+				}
+
+				vertexFA.set( meshOutputGroup.vertices, vertexFAOffset );
+				vertexFAOffset += meshOutputGroup.vertices.length;
+
+				if ( indexUA ) {
+
+					indexUA.set( meshOutputGroup.indices, indexUAOffset );
+					indexUAOffset += meshOutputGroup.indices.length;
+
+				}
+
+				if ( colorFA ) {
+
+					colorFA.set( meshOutputGroup.colors, colorFAOffset );
+					colorFAOffset += meshOutputGroup.colors.length;
+
+				}
+
+				if ( normalFA ) {
+
+					normalFA.set( meshOutputGroup.normals, normalFAOffset );
+					normalFAOffset += meshOutputGroup.normals.length;
+
+				}
+				if ( uvFA ) {
+
+					uvFA.set( meshOutputGroup.uvs, uvFAOffset );
+					uvFAOffset += meshOutputGroup.uvs.length;
+
+				}
+
+				if ( this.logging.enabled && this.logging.debug ) {
+					var materialIndexLine = THREE.LoaderSupport.Validator.isValid( selectedMaterialIndex ) ? '\n\t\tmaterialIndex: ' + selectedMaterialIndex : '';
+					var createdReport = '\tOutput Object no.: ' + this.outputObjectCount +
+						'\n\t\tgroupName: ' + meshOutputGroup.groupName +
+						'\n\t\tIndex: ' + meshOutputGroup.index +
+						'\n\t\tfaceType: ' + this.rawMesh.faceType +
+						'\n\t\tmaterialName: ' + meshOutputGroup.materialName +
+						'\n\t\tsmoothingGroup: ' + meshOutputGroup.smoothingGroup +
+						materialIndexLine +
+						'\n\t\tobjectName: ' + meshOutputGroup.objectName +
+						'\n\t\t#vertices: ' + meshOutputGroup.vertices.length / 3 +
+						'\n\t\t#indices: ' + meshOutputGroup.indices.length +
+						'\n\t\t#colors: ' + meshOutputGroup.colors.length / 3 +
+						'\n\t\t#uvs: ' + meshOutputGroup.uvs.length / 2 +
+						'\n\t\t#normals: ' + meshOutputGroup.normals.length / 3;
+					console.debug( createdReport );
+				}
+
+			}
+
+			this.outputObjectCount++;
+			this.callbackMeshBuilder(
+				{
+					cmd: 'meshData',
+					progress: {
+						numericalValue: this.globalCounts.currentByte / this.globalCounts.totalBytes
+					},
+					params: {
+						meshName: result.name
+					},
+					materials: {
+						multiMaterial: createMultiMaterial,
+						materialNames: materialNames,
+						materialGroups: materialGroups
+					},
+					buffers: {
+						vertices: vertexFA,
+						indices: indexUA,
+						colors: colorFA,
+						normals: normalFA,
+						uvs: uvFA
+					},
+					// 0: mesh, 1: line, 2: point
+					geometryType: this.rawMesh.faceType < 4 ? 0 : ( this.rawMesh.faceType === 6 ) ? 2 : 1
+				},
+				[ vertexFA.buffer ],
+				THREE.LoaderSupport.Validator.isValid( indexUA ) ? [ indexUA.buffer ] : null,
+				THREE.LoaderSupport.Validator.isValid( colorFA ) ? [ colorFA.buffer ] : null,
+				THREE.LoaderSupport.Validator.isValid( normalFA ) ? [ normalFA.buffer ] : null,
+				THREE.LoaderSupport.Validator.isValid( uvFA ) ? [ uvFA.buffer ] : null
+			);
+		};
+
+		Parser.prototype.finalizeParsing = function () {
+			if ( this.logging.enabled ) console.info( 'Global output object count: ' + this.outputObjectCount );
+			if ( this.processCompletedMesh() && this.logging.enabled ) {
+
+				var parserFinalReport = 'Overall counts: ' +
+					'\n\tVertices: ' + this.globalCounts.vertices +
+					'\n\tFaces: ' + this.globalCounts.faces +
+					'\n\tMultiple definitions: ' + this.globalCounts.doubleIndicesCount;
+				console.info( parserFinalReport );
+
+			}
+		};
+
+		return Parser;
+	})();
+
+	/**
+	 * Utility method for loading an mtl file according resource description. Provide url or content.
+	 * @memberOf THREE.OBJLoader2
+	 *
+	 * @param {string} url URL to the file
+	 * @param {Object} content The file content as arraybuffer or text
+	 * @param {function} callbackOnLoad Callback to be called after successful load
+	 * @param {string} [crossOrigin] CORS value
+ 	 * @param {Object} [materialOptions] Set material loading options for MTLLoader
+	 */
+	OBJLoader2.prototype.loadMtl = function ( url, content, callbackOnLoad, crossOrigin, materialOptions ) {
+		var resource = new THREE.LoaderSupport.ResourceDescriptor( url, 'MTL' );
+		resource.setContent( content );
+		this._loadMtl( resource, callbackOnLoad, crossOrigin, materialOptions );
+	};
+
+
+	OBJLoader2.prototype._loadMtl = function ( resource, callbackOnLoad, crossOrigin, materialOptions ) {
+		if ( THREE.MTLLoader === undefined ) console.error( '"THREE.MTLLoader" is not available. "THREE.OBJLoader2" requires it for loading MTL files.' );
+		if ( Validator.isValid( resource ) && this.logging.enabled ) console.time( 'Loading MTL: ' + resource.name );
+
+		var materials = [];
+		var scope = this;
+		var processMaterials = function ( materialCreator ) {
+			var materialCreatorMaterials = [];
+			if ( Validator.isValid( materialCreator ) ) {
+
+				materialCreator.preload();
+				materialCreatorMaterials = materialCreator.materials;
+				for ( var materialName in materialCreatorMaterials ) {
+
+					if ( materialCreatorMaterials.hasOwnProperty( materialName ) ) {
+
+						materials[ materialName ] = materialCreatorMaterials[ materialName ];
+
+					}
+				}
+			}
+
+			if ( Validator.isValid( resource ) && scope.logging.enabled ) console.timeEnd( 'Loading MTL: ' + resource.name );
+			callbackOnLoad( materials, materialCreator );
+		};
+
+		// fast-fail
+		if ( ! Validator.isValid( resource ) || ( ! Validator.isValid( resource.content ) && ! Validator.isValid( resource.url ) ) ) {
+
+			processMaterials();
+
+		} else {
+
+			var mtlLoader = new THREE.MTLLoader( this.manager );
+			crossOrigin = Validator.verifyInput( crossOrigin, 'anonymous' );
+			mtlLoader.setCrossOrigin( crossOrigin );
+			mtlLoader.setPath( resource.path );
+			if ( Validator.isValid( materialOptions ) ) mtlLoader.setMaterialOptions( materialOptions );
+
+			var parseTextWithMtlLoader = function ( content ) {
+				var contentAsText = content;
+				if ( typeof( content ) !== 'string' && ! ( content instanceof String ) ) {
+
+					if ( content.length > 0 || content.byteLength > 0 ) {
+
+						contentAsText = THREE.LoaderUtils.decodeText( content );
+
+					} else {
+
+						throw 'Unable to parse mtl as it it seems to be neither a String, an Array or an ArrayBuffer!';
+					}
+
+				}
+				processMaterials( mtlLoader.parse( contentAsText ) );
+			};
+
+			if ( Validator.isValid( resource.content ) ) {
+
+				parseTextWithMtlLoader( resource.content );
+
+			} else if ( Validator.isValid( resource.url ) ) {
+
+				var fileLoader = new THREE.FileLoader( this.manager );
+				fileLoader.load( resource.url, parseTextWithMtlLoader, this._onProgress, this._onError );
+
+			}
+		}
+	};
+
+	return OBJLoader2;
+})();
+
+ return THREE.OBJLoader2;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('OBJLoader',["three", "vendor/three/loaders/OBJLoader2", "lodash"], function( THREE, OBJLoader2, _ ){
+    var OBJLoader = function ( manager, logger )
+    { 
+        OBJLoader2.call( this, manager, logger );
+    };
+
+    OBJLoader.prototype = _.create( OBJLoader2.prototype, {
+        constructor : OBJLoader,
+        
+        load : function(url, onLoad, onProgress, onError)
+        {
+            onLoad = onLoad || function(){};
+            if( url === null || url === undefined || url === "" ) {
+                onLoad( null );
+            };
+            var scope = this;
+
+            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
+
+            require(["text!" + url], function ( responseText ) {
+                var fnc = onLoad || function(){};
+                fnc ( scope.parse( responseText, path ) );
+            }, onError);
+        }
+        
+    });
+
+    return OBJLoader;
+});
+
+
+define('vendor/three/loaders/MTLLoader',["three"], function(THREE){
+/**
+ * Loads a Wavefront .mtl file specifying materials
+ *
+ * @author angelxuanchang
+ */
+
+THREE.MTLLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.MTLLoader.prototype = {
+
+	constructor: THREE.MTLLoader,
+
+	/**
+	 * Loads and parses a MTL asset from a URL.
+	 *
+	 * @param {String} url - URL to the MTL file.
+	 * @param {Function} [onLoad] - Callback invoked with the loaded object.
+	 * @param {Function} [onProgress] - Callback for download progress.
+	 * @param {Function} [onError] - Callback for download errors.
+	 *
+	 * @see setPath setTexturePath
+	 *
+	 * @note In order for relative texture references to resolve correctly
+	 * you must call setPath and/or setTexturePath explicitly prior to load.
+	 */
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var loader = new THREE.FileLoader( this.manager );
+		loader.setPath( this.path );
+		loader.load( url, function ( text ) {
+
+			onLoad( scope.parse( text ) );
+
+		}, onProgress, onError );
+
+	},
+
+	/**
+	 * Set base path for resolving references.
+	 * If set this path will be prepended to each loaded and found reference.
+	 *
+	 * @see setTexturePath
+	 * @param {String} path
+	 * @return {THREE.MTLLoader}
+	 *
+	 * @example
+	 *     mtlLoader.setPath( 'assets/obj/' );
+	 *     mtlLoader.load( 'my.mtl', ... );
+	 */
+	setPath: function ( path ) {
+
+		this.path = path;
+		return this;
+
+	},
+
+	/**
+	 * Set base path for resolving texture references.
+	 * If set this path will be prepended found texture reference.
+	 * If not set and setPath is, it will be used as texture base path.
+	 *
+	 * @see setPath
+	 * @param {String} path
+	 * @return {THREE.MTLLoader}
+	 *
+	 * @example
+	 *     mtlLoader.setPath( 'assets/obj/' );
+	 *     mtlLoader.setTexturePath( 'assets/textures/' );
+	 *     mtlLoader.load( 'my.mtl', ... );
+	 */
+	setTexturePath: function ( path ) {
+
+		this.texturePath = path;
+		return this;
+
+	},
+
+	setBaseUrl: function ( path ) {
+
+		console.warn( 'THREE.MTLLoader: .setBaseUrl() is deprecated. Use .setTexturePath( path ) for texture path or .setPath( path ) for general base path instead.' );
+
+		return this.setTexturePath( path );
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+		return this;
+
+	},
+
+	setMaterialOptions: function ( value ) {
+
+		this.materialOptions = value;
+		return this;
+
+	},
+
+	/**
+	 * Parses a MTL file.
+	 *
+	 * @param {String} text - Content of MTL file
+	 * @return {THREE.MTLLoader.MaterialCreator}
+	 *
+	 * @see setPath setTexturePath
+	 *
+	 * @note In order for relative texture references to resolve correctly
+	 * you must call setPath and/or setTexturePath explicitly prior to parse.
+	 */
+	parse: function ( text ) {
+
+		var lines = text.split( '\n' );
+		var info = {};
+		var delimiter_pattern = /\s+/;
+		var materialsInfo = {};
+
+		for ( var i = 0; i < lines.length; i ++ ) {
+
+			var line = lines[ i ];
+			line = line.trim();
+
+			if ( line.length === 0 || line.charAt( 0 ) === '#' ) {
+
+				// Blank line or comment ignore
+				continue;
+
+			}
+
+			var pos = line.indexOf( ' ' );
+
+			var key = ( pos >= 0 ) ? line.substring( 0, pos ) : line;
+			key = key.toLowerCase();
+
+			var value = ( pos >= 0 ) ? line.substring( pos + 1 ) : '';
+			value = value.trim();
+
+			if ( key === 'newmtl' ) {
+
+				// New material
+
+				info = { name: value };
+				materialsInfo[ value ] = info;
+
+			} else if ( info ) {
+
+				if ( key === 'ka' || key === 'kd' || key === 'ks' ) {
+
+					var ss = value.split( delimiter_pattern, 3 );
+					info[ key ] = [ parseFloat( ss[ 0 ] ), parseFloat( ss[ 1 ] ), parseFloat( ss[ 2 ] ) ];
+
+				} else {
+
+					info[ key ] = value;
+
+				}
+
+			}
+
+		}
+
+		var materialCreator = new THREE.MTLLoader.MaterialCreator( this.texturePath || this.path, this.materialOptions );
+		materialCreator.setCrossOrigin( this.crossOrigin );
+		materialCreator.setManager( this.manager );
+		materialCreator.setMaterials( materialsInfo );
+		return materialCreator;
+
+	}
+
+};
+
+/**
+ * Create a new THREE-MTLLoader.MaterialCreator
+ * @param baseUrl - Url relative to which textures are loaded
+ * @param options - Set of options on how to construct the materials
+ *                  side: Which side to apply the material
+ *                        THREE.FrontSide (default), THREE.BackSide, THREE.DoubleSide
+ *                  wrap: What type of wrapping to apply for textures
+ *                        THREE.RepeatWrapping (default), THREE.ClampToEdgeWrapping, THREE.MirroredRepeatWrapping
+ *                  normalizeRGB: RGBs need to be normalized to 0-1 from 0-255
+ *                                Default: false, assumed to be already normalized
+ *                  ignoreZeroRGBs: Ignore values of RGBs (Ka,Kd,Ks) that are all 0's
+ *                                  Default: false
+ * @constructor
+ */
+
+THREE.MTLLoader.MaterialCreator = function ( baseUrl, options ) {
+
+	this.baseUrl = baseUrl || '';
+	this.options = options;
+	this.materialsInfo = {};
+	this.materials = {};
+	this.materialsArray = [];
+	this.nameLookup = {};
+
+	this.side = ( this.options && this.options.side ) ? this.options.side : THREE.FrontSide;
+	this.wrap = ( this.options && this.options.wrap ) ? this.options.wrap : THREE.RepeatWrapping;
+
+};
+
+THREE.MTLLoader.MaterialCreator.prototype = {
+
+	constructor: THREE.MTLLoader.MaterialCreator,
+
+	crossOrigin: 'Anonymous',
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	},
+
+	setManager: function ( value ) {
+
+		this.manager = value;
+
+	},
+
+	setMaterials: function ( materialsInfo ) {
+
+		this.materialsInfo = this.convert( materialsInfo );
+		this.materials = {};
+		this.materialsArray = [];
+		this.nameLookup = {};
+
+	},
+
+	convert: function ( materialsInfo ) {
+
+		if ( ! this.options ) return materialsInfo;
+
+		var converted = {};
+
+		for ( var mn in materialsInfo ) {
+
+			// Convert materials info into normalized form based on options
+
+			var mat = materialsInfo[ mn ];
+
+			var covmat = {};
+
+			converted[ mn ] = covmat;
+
+			for ( var prop in mat ) {
+
+				var save = true;
+				var value = mat[ prop ];
+				var lprop = prop.toLowerCase();
+
+				switch ( lprop ) {
+
+					case 'kd':
+					case 'ka':
+					case 'ks':
+
+						// Diffuse color (color under white light) using RGB values
+
+						if ( this.options && this.options.normalizeRGB ) {
+
+							value = [ value[ 0 ] / 255, value[ 1 ] / 255, value[ 2 ] / 255 ];
+
+						}
+
+						if ( this.options && this.options.ignoreZeroRGBs ) {
+
+							if ( value[ 0 ] === 0 && value[ 1 ] === 0 && value[ 2 ] === 0 ) {
+
+								// ignore
+
+								save = false;
+
+							}
+
+						}
+
+						break;
+
+					default:
+
+						break;
+
+				}
+
+				if ( save ) {
+
+					covmat[ lprop ] = value;
+
+				}
+
+			}
+
+		}
+
+		return converted;
+
+	},
+
+	preload: function () {
+
+		for ( var mn in this.materialsInfo ) {
+
+			this.create( mn );
+
+		}
+
+	},
+
+	getIndex: function ( materialName ) {
+
+		return this.nameLookup[ materialName ];
+
+	},
+
+	getAsArray: function () {
+
+		var index = 0;
+
+		for ( var mn in this.materialsInfo ) {
+
+			this.materialsArray[ index ] = this.create( mn );
+			this.nameLookup[ mn ] = index;
+			index ++;
+
+		}
+
+		return this.materialsArray;
+
+	},
+
+	create: function ( materialName ) {
+
+		if ( this.materials[ materialName ] === undefined ) {
+
+			this.createMaterial_( materialName );
+
+		}
+
+		return this.materials[ materialName ];
+
+	},
+
+	createMaterial_: function ( materialName ) {
+
+		// Create material
+
+		var scope = this;
+		var mat = this.materialsInfo[ materialName ];
+		var params = {
+
+			name: materialName,
+			side: this.side
+
+		};
+
+		function resolveURL( baseUrl, url ) {
+
+			if ( typeof url !== 'string' || url === '' )
+				return '';
+
+			// Absolute URL
+			if ( /^https?:\/\//i.test( url ) ) return url;
+
+			return baseUrl + url;
+
+		}
+
+		function setMapForType( mapType, value ) {
+
+			if ( params[ mapType ] ) return; // Keep the first encountered texture
+
+			var texParams = scope.getTextureParams( value, params );
+			var map = scope.loadTexture( resolveURL( scope.baseUrl, texParams.url ) );
+
+			map.repeat.copy( texParams.scale );
+			map.offset.copy( texParams.offset );
+
+			map.wrapS = scope.wrap;
+			map.wrapT = scope.wrap;
+
+			params[ mapType ] = map;
+
+		}
+
+		for ( var prop in mat ) {
+
+			var value = mat[ prop ];
+			var n;
+
+			if ( value === '' ) continue;
+
+			switch ( prop.toLowerCase() ) {
+
+				// Ns is material specular exponent
+
+				case 'kd':
+
+					// Diffuse color (color under white light) using RGB values
+
+					params.color = new THREE.Color().fromArray( value );
+
+					break;
+
+				case 'ks':
+
+					// Specular color (color when light is reflected from shiny surface) using RGB values
+					params.specular = new THREE.Color().fromArray( value );
+
+					break;
+
+				case 'map_kd':
+
+					// Diffuse texture map
+
+					setMapForType( "map", value );
+
+					break;
+
+				case 'map_ks':
+
+					// Specular map
+
+					setMapForType( "specularMap", value );
+
+					break;
+
+				case 'norm':
+
+					setMapForType( "normalMap", value );
+
+					break;
+
+				case 'map_bump':
+				case 'bump':
+
+					// Bump texture map
+
+					setMapForType( "bumpMap", value );
+
+					break;
+
+				case 'ns':
+
+					// The specular exponent (defines the focus of the specular highlight)
+					// A high exponent results in a tight, concentrated highlight. Ns values normally range from 0 to 1000.
+
+					params.shininess = parseFloat( value );
+
+					break;
+
+				case 'd':
+					n = parseFloat( value );
+
+					if ( n < 1 ) {
+
+						params.opacity = n;
+						params.transparent = true;
+
+					}
+
+					break;
+
+				case 'tr':
+					n = parseFloat( value );
+
+					if ( this.options && this.options.invertTrProperty ) n = 1 - n;
+
+					if ( n > 0 ) {
+
+						params.opacity = 1 - n;
+						params.transparent = true;
+
+					}
+
+					break;
+
+				default:
+					break;
+
+			}
+
+		}
+
+		this.materials[ materialName ] = new THREE.MeshPhongMaterial( params );
+		return this.materials[ materialName ];
+
+	},
+
+	getTextureParams: function ( value, matParams ) {
+
+		var texParams = {
+
+			scale: new THREE.Vector2( 1, 1 ),
+			offset: new THREE.Vector2( 0, 0 )
+
+		 };
+
+		var items = value.split( /\s+/ );
+		var pos;
+
+		pos = items.indexOf( '-bm' );
+
+		if ( pos >= 0 ) {
+
+			matParams.bumpScale = parseFloat( items[ pos + 1 ] );
+			items.splice( pos, 2 );
+
+		}
+
+		pos = items.indexOf( '-s' );
+
+		if ( pos >= 0 ) {
+
+			texParams.scale.set( parseFloat( items[ pos + 1 ] ), parseFloat( items[ pos + 2 ] ) );
+			items.splice( pos, 4 ); // we expect 3 parameters here!
+
+		}
+
+		pos = items.indexOf( '-o' );
+
+		if ( pos >= 0 ) {
+
+			texParams.offset.set( parseFloat( items[ pos + 1 ] ), parseFloat( items[ pos + 2 ] ) );
+			items.splice( pos, 4 ); // we expect 3 parameters here!
+
+		}
+
+		texParams.url = items.join( ' ' ).trim();
+		return texParams;
+
+	},
+
+	loadTexture: function ( url, mapping, onLoad, onProgress, onError ) {
+
+		var texture;
+		var loader = THREE.Loader.Handlers.get( url );
+		var manager = ( this.manager !== undefined ) ? this.manager : THREE.DefaultLoadingManager;
+
+		if ( loader === null ) {
+
+			loader = new THREE.TextureLoader( manager );
+
+		}
+
+		if ( loader.setCrossOrigin ) loader.setCrossOrigin( this.crossOrigin );
+		texture = loader.load( url, onLoad, onProgress, onError );
+
+		if ( mapping !== undefined ) texture.mapping = mapping;
+
+		return texture;
+
+	}
+
+};
+
+ return THREE.MTLLoader;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('MTLLoader',["three", "vendor/three/loaders/MTLLoader", "lodash"], function( THREE, ThreeMTLLoader, _ ){
+    var MTLLoader = function ( manager, logger )
+    { 
+        ThreeMTLLoader.call( this, manager, logger );
+    };
+
+    MTLLoader.prototype = _.create( ThreeMTLLoader.prototype, {
+        constructor : MTLLoader,
+        
+        load : function(url, onLoad, onProgress, onError)
+        {
+            onLoad = onLoad || function(){};
+            if( url === null || url === undefined || url === "" ) {
+                onLoad( null );
+            };
+            var scope = this;
+
+            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
+
+            require(["text!" + url], function ( responseText ) {
+                var fnc = onLoad || function(){};
+                fnc ( scope.parse( responseText, path ) );
+            }, onError);
+        }
+        
+    });
+
+    return MTLLoader;
+});
+
+
+define('vendor/three/loaders/STLLoader',["three"], function(THREE){
+/**
+ * @author aleeper / http://adamleeper.com/
+ * @author mrdoob / http://mrdoob.com/
+ * @author gero3 / https://github.com/gero3
+ * @author Mugen87 / https://github.com/Mugen87
+ *
+ * Description: A THREE loader for STL ASCII files, as created by Solidworks and other CAD programs.
+ *
+ * Supports both binary and ASCII encoded files, with automatic detection of type.
+ *
+ * The loader returns a non-indexed buffer geometry.
+ *
+ * Limitations:
+ *  Binary decoding supports "Magics" color format (http://en.wikipedia.org/wiki/STL_(file_format)#Color_in_binary_STL).
+ *  There is perhaps some question as to how valid it is to always assume little-endian-ness.
+ *  ASCII decoding assumes file is UTF-8.
+ *
+ * Usage:
+ *  var loader = new THREE.STLLoader();
+ *  loader.load( './models/stl/slotted_disk.stl', function ( geometry ) {
+ *    scene.add( new THREE.Mesh( geometry ) );
+ *  });
+ *
+ * For binary STLs geometry might contain colors for vertices. To use it:
+ *  // use the same code to load STL as above
+ *  if (geometry.hasColors) {
+ *    material = new THREE.MeshPhongMaterial({ opacity: geometry.alpha, vertexColors: THREE.VertexColors });
+ *  } else { .... }
+ *  var mesh = new THREE.Mesh( geometry, material );
+ */
+
+
+THREE.STLLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.STLLoader.prototype = {
+
+	constructor: THREE.STLLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var loader = new THREE.FileLoader( scope.manager );
+		loader.setResponseType( 'arraybuffer' );
+		loader.load( url, function ( text ) {
+
+			try {
+
+				onLoad( scope.parse( text ) );
+
+			} catch ( exception ) {
+
+				if ( onError ) {
+
+					onError( exception );
+
+				}
+
+			}
+
+		}, onProgress, onError );
+
+	},
+
+	parse: function ( data ) {
+
+		function isBinary( data ) {
+
+			var expect, face_size, n_faces, reader;
+			reader = new DataView( data );
+			face_size = ( 32 / 8 * 3 ) + ( ( 32 / 8 * 3 ) * 3 ) + ( 16 / 8 );
+			n_faces = reader.getUint32( 80, true );
+			expect = 80 + ( 32 / 8 ) + ( n_faces * face_size );
+
+			if ( expect === reader.byteLength ) {
+
+				return true;
+
+			}
+
+			// An ASCII STL data must begin with 'solid ' as the first six bytes.
+			// However, ASCII STLs lacking the SPACE after the 'd' are known to be
+			// plentiful.  So, check the first 5 bytes for 'solid'.
+
+			// US-ASCII ordinal values for 's', 'o', 'l', 'i', 'd'
+
+			var solid = [ 115, 111, 108, 105, 100 ];
+
+			for ( var i = 0; i < 5; i ++ ) {
+
+				// If solid[ i ] does not match the i-th byte, then it is not an
+				// ASCII STL; hence, it is binary and return true.
+
+				if ( solid[ i ] != reader.getUint8( i, false ) ) return true;
+
+ 			}
+
+			// First 5 bytes read "solid"; declare it to be an ASCII STL
+
+			return false;
+
+		}
+
+		function parseBinary( data ) {
+
+			var reader = new DataView( data );
+			var faces = reader.getUint32( 80, true );
+
+			var r, g, b, hasColors = false, colors;
+			var defaultR, defaultG, defaultB, alpha;
+
+			// process STL header
+			// check for default color in header ("COLOR=rgba" sequence).
+
+			for ( var index = 0; index < 80 - 10; index ++ ) {
+
+				if ( ( reader.getUint32( index, false ) == 0x434F4C4F /*COLO*/ ) &&
+					( reader.getUint8( index + 4 ) == 0x52 /*'R'*/ ) &&
+					( reader.getUint8( index + 5 ) == 0x3D /*'='*/ ) ) {
+
+					hasColors = true;
+					colors = [];
+
+					defaultR = reader.getUint8( index + 6 ) / 255;
+					defaultG = reader.getUint8( index + 7 ) / 255;
+					defaultB = reader.getUint8( index + 8 ) / 255;
+					alpha = reader.getUint8( index + 9 ) / 255;
+
+				}
+
+			}
+
+			var dataOffset = 84;
+			var faceLength = 12 * 4 + 2;
+
+			var geometry = new THREE.BufferGeometry();
+
+			var vertices = [];
+			var normals = [];
+
+			for ( var face = 0; face < faces; face ++ ) {
+
+				var start = dataOffset + face * faceLength;
+				var normalX = reader.getFloat32( start, true );
+				var normalY = reader.getFloat32( start + 4, true );
+				var normalZ = reader.getFloat32( start + 8, true );
+
+				if ( hasColors ) {
+
+					var packedColor = reader.getUint16( start + 48, true );
+
+					if ( ( packedColor & 0x8000 ) === 0 ) {
+
+						// facet has its own unique color
+
+						r = ( packedColor & 0x1F ) / 31;
+						g = ( ( packedColor >> 5 ) & 0x1F ) / 31;
+						b = ( ( packedColor >> 10 ) & 0x1F ) / 31;
+
+					} else {
+
+						r = defaultR;
+						g = defaultG;
+						b = defaultB;
+
+					}
+
+				}
+
+				for ( var i = 1; i <= 3; i ++ ) {
+
+					var vertexstart = start + i * 12;
+
+					vertices.push( reader.getFloat32( vertexstart, true ) );
+					vertices.push( reader.getFloat32( vertexstart + 4, true ) );
+					vertices.push( reader.getFloat32( vertexstart + 8, true ) );
+
+					normals.push( normalX, normalY, normalZ );
+
+					if ( hasColors ) {
+
+						colors.push( r, g, b );
+
+					}
+
+				}
+
+			}
+
+			geometry.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( vertices ), 3 ) );
+			geometry.addAttribute( 'normal', new THREE.BufferAttribute( new Float32Array( normals ), 3 ) );
+
+			if ( hasColors ) {
+
+				geometry.addAttribute( 'color', new THREE.BufferAttribute( new Float32Array( colors ), 3 ) );
+				geometry.hasColors = true;
+				geometry.alpha = alpha;
+
+			}
+
+			return geometry;
+
+		}
+
+		function parseASCII( data ) {
+
+			var geometry = new THREE.BufferGeometry();
+			var patternFace = /facet([\s\S]*?)endfacet/g;
+			var faceCounter = 0;
+
+			var patternFloat = /[\s]+([+-]?(?:\d*)(?:\.\d*)?(?:[eE][+-]?\d+)?)/.source;
+			var patternVertex = new RegExp( 'vertex' + patternFloat + patternFloat + patternFloat, 'g' );
+			var patternNormal = new RegExp( 'normal' + patternFloat + patternFloat + patternFloat, 'g' );
+
+			var vertices = [];
+			var normals = [];
+
+			var normal = new THREE.Vector3();
+
+			var result;
+
+			while ( ( result = patternFace.exec( data ) ) !== null ) {
+
+				var vertexCountPerFace = 0;
+				var normalCountPerFace = 0;
+
+				var text = result[ 0 ];
+
+				while ( ( result = patternNormal.exec( text ) ) !== null ) {
+
+					normal.x = parseFloat( result[ 1 ] );
+					normal.y = parseFloat( result[ 2 ] );
+					normal.z = parseFloat( result[ 3 ] );
+					normalCountPerFace ++;
+
+				}
+
+				while ( ( result = patternVertex.exec( text ) ) !== null ) {
+
+					vertices.push( parseFloat( result[ 1 ] ), parseFloat( result[ 2 ] ), parseFloat( result[ 3 ] ) );
+					normals.push( normal.x, normal.y, normal.z );
+					vertexCountPerFace ++;
+
+				}
+
+				// every face have to own ONE valid normal
+
+				if ( normalCountPerFace !== 1 ) {
+
+					console.error( 'THREE.STLLoader: Something isn\'t right with the normal of face number ' + faceCounter );
+
+				}
+
+				// each face have to own THREE valid vertices
+
+				if ( vertexCountPerFace !== 3 ) {
+
+					console.error( 'THREE.STLLoader: Something isn\'t right with the vertices of face number ' + faceCounter );
+
+				}
+
+				faceCounter ++;
+
+			}
+
+			geometry.addAttribute( 'position', new THREE.Float32BufferAttribute( vertices, 3 ) );
+			geometry.addAttribute( 'normal', new THREE.Float32BufferAttribute( normals, 3 ) );
+
+			return geometry;
+
+		}
+
+		function ensureString( buffer ) {
+
+			if ( typeof buffer !== 'string' ) {
+
+				return THREE.LoaderUtils.decodeText( new Uint8Array( buffer ) );
+
+			}
+
+			return buffer;
+
+		}
+
+		function ensureBinary( buffer ) {
+
+			if ( typeof buffer === 'string' ) {
+
+				var array_buffer = new Uint8Array( buffer.length );
+				for ( var i = 0; i < buffer.length; i ++ ) {
+
+					array_buffer[ i ] = buffer.charCodeAt( i ) & 0xff; // implicitly assumes little-endian
+
+				}
+				return array_buffer.buffer || array_buffer;
+
+			} else {
+
+				return buffer;
+
+			}
+
+		}
+
+		// start
+
+		var binData = ensureBinary( data );
+
+		return isBinary( binData ) ? parseBinary( binData ) : parseASCII( ensureString( data ) );
+
+	}
+
+};
+
+ return THREE.STLLoader;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('STLLoader',["three", "vendor/three/loaders/STLLoader", "lodash"], function( THREE, ThreeSTLLoader, _ ){
+    var STLLoader = function ( manager, logger )
+    { 
+        ThreeSTLLoader.call( this, manager, logger );
+    };
+
+    STLLoader.prototype = _.create( ThreeSTLLoader.prototype, {
+        constructor : STLLoader,
+        
+        load : function(url, onLoad, onProgress, onError)
+        {
+            onLoad = onLoad || function(){};
+            if( url === null || url === undefined || url === "" ) {
+                onLoad( null );
+            };
+            var scope = this;
+
+            var path = scope.path === undefined ? THREE.LoaderUtils.extractUrlBase( url ) : scope.path;
+
+            require(["text!" + url], function ( responseText ) {
+                var fnc = onLoad || function(){};
+                try{
+                    fnc ( scope.parse( responseText, path ) );
+                }
+                catch( e ){
+                    onError ( e );
+                }
+                
+            }, onError);
+        }
+        
+    });
+
+    return STLLoader;
+});
+
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('UniversalLoader',["three", "STLLoader", "ColladaLoader", "OBJLoader", "MTLLoader"], function( THREE, STLLoader, ColladaLoader, OBJLoader, MTLLoader ) {
+
+    var UniversalLoader = function(){
+        
+    };
+
+    UniversalLoader.prototype.load = function( urls, onLoad, onError ){
+	
+        // handle arguments polymorphism
+	if( typeof(urls) === 'string' )	urls	= [urls];
+
+	// load stl
+	if( urls[0].match(/\.stl$/i) && urls.length === 1 ){
+		this.loader	= new STLLoader();
+		this.loader.addEventListener('load', function( event ){
+			var geometry	= event.content;
+			var material	= new THREE.MeshPhongMaterial();
+			var object3d	= new THREE.Mesh( geometry, material );
+			onLoad(object3d);
+		});
+		this.loader.load(urls[0]);
+                
+		return;
+                
+	}else if( urls[0].match(/\.dae$/i) && urls.length === 1 ){
+		this.loader = new ColladaLoader();
+		this.loader.options.convertUpAxis = true;
+		this.loader.load(urls[0], function( collada ){
+                    // console.dir(arguments)
+                    var object3d = collada.scene;
+                    onLoad( object3d );
+		}, null, onError);
+		return;
+                
+	}else if( urls[0].match(/\.js$/i) && urls.length === 1 ){
+		this.loader = new THREE.JSONLoader();
+		this.loader.load(urls[0], function(geometry, materials){
+			if( materials.length > 1 ){
+				var material	= new THREE.MeshFaceMaterial(materials);
+			}else{
+				var material	= materials[0];
+			}
+			var object3d	= new THREE.Mesh(geometry, material);
+			onLoad(object3d);
+		});
+		return;
+                
+	}else if( urls[0].match(/\.obj$/i) && urls.length === 1 ){
+		this.loader = new OBJLoader();
+		this.loader.load(urls[0], function(object3d){
+			onLoad(object3d);
+		});
+		return;
+        }else if( urls[0].match(/\.mtl$/i) && urls.length === 1 ){
+		this.loader	= new MTLLoader();
+		this.loader.load(urls[1], urls[0], function( material ){
+			onLoad( material );
+		});
+		return;
+                        
+	}else if( urls.length === 2 && urls[0].match(/\.mtl$/i) && urls[1].match(/\.obj$/i) ){
+            _loadOBJMTL( [urls[1], urls[0]], onLoad, onError );
+            return;
+                
+	}else if( urls.length === 2 && urls[0].match(/\.obj$/i) && urls[1].match(/\.mtl$/i) ){
+            _loadOBJMTL( urls, onLoad, onError );
+            return;
+                
+	}else	console.assert( false );
+    };
+    
+    var _loadOBJMTL = function( urls, onLoad, onError ){
+        
+        var mtlLoader = new MTLLoader();
+            //mtlLoader.setPath( 'models/obj/male02/' );
+        
+        mtlLoader.load( urls[1], function( materials ) {
+            materials.preload();
+            var objLoader = new OBJLoader();
+            objLoader.setMaterials( materials );
+            //objLoader.setPath( 'models/obj/male02/' );
+            objLoader.load( urls[0], function ( object3d ) {
+
+                onLoad( object3d );
+            }, null, onError );
+        });
+        
+    };
+    
+    return UniversalLoader;
+});
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('ObjectDAE',["three", "lodash", "ColladaLoader"], function( THREE, _, ColladaLoader )
+{
+    var defaults = {
+        shadow : false,
+        scale : 39.37,
+        onLoad : function(){}
+    };
+
+    var enableShadow = function( dae )
+    {
+        dae.traverse( function ( child ) {
+            if ( child instanceof THREE.Mesh ) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+            }
+        });
+    };
+    var setName = function( dae )
+    {
+        var counter = 0;
+        dae.traverse( function ( child ) {
+            if ( child instanceof THREE.Mesh ) {
+                child.name = dae.name + counter;
+                counter++;
+            }
+        });
+    };
+
+    var counterClockwiseFaceOrder = function( dae )
+    {
+        dae.traverse( function ( el ) {
+            if ( el instanceof THREE.Mesh ) {
+                _.each( el.geometry.faces, function( face ){
+                    var temp = face.a;
+                    face.a = face.c;
+                    face.c = temp;
+                });
+            }
+        });
+
+    };
+
+    var ObjectDAE = function( file, opt )
+    {
+        var loader = new ColladaLoader();
+        loader.options.convertUpAxis = true;
+
+        this.options = _.extend( {}, defaults, opt );
+
+        THREE.Object3D.call( this );
+
+        this.registerEvents();
+
+        loader.load( file, function( collada )
+        {
+            var dae = collada.scene;
+            dae.name = this.options.name || file;
+            setName(dae);
+            if ( this.options.shadow ) enableShadow( dae );
+
+            var scaleX = (this.options.mirror)? -this.options.scale : this.options.scale;
+            dae.scale.set( scaleX, this.options.scale, this.options.scale );
+
+            if( this.options.mirror ) counterClockwiseFaceOrder( dae );
+
+            this.add( dae );
+            this.options.onLoad( this, dae );
+        }.bind(this) );
+    };
+
+    //inherits from THREE.Object3D
+    ObjectDAE.prototype = Object.create( THREE.Object3D.prototype );
+    ObjectDAE.prototype.constructor = ObjectDAE;
+    
+    ObjectDAE.prototype.registerEvents = function(){
+        
+    };
+    
+    return ObjectDAE;
+});
+
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('pack-Loaders',["ColladaLoader", "OBJLoader", "MTLLoader", "UniversalLoader", "ObjectDAE"], function( ColladaLoader, OBJLoader, MTLLoader, UniversalLoader, ObjectDAE ){
+    return {
+        ColladaLoader   : ColladaLoader,
+        OBJLoader       : OBJLoader,
+        MTLLoader       : MTLLoader,
+        UniversalLoader : UniversalLoader,
+        ObjectDAE       : ObjectDAE
+    };
+});
+
 /* 
  * To change this license header, choose License Headers in Project Properties.
  * To change this template file, choose Tools | Templates
@@ -100537,13 +108400,13 @@ define('image',[],function(){
  * To change this template file, choose Tools | Templates
  * and open the template in the editor.
  */
-define('threeVP-Extras',["lodash", "pack-postprocessing", "pack-shaders", "plugins/plg.Tween", 
+define('threeVP-Extras',["lodash", "pack-postprocessing", "pack-shaders", "pack-Interactive", "pack-Loaders", "plugins/plg.Tween", 
     "utilities/ModelDatGui", "factorys/Factory",
     "lights/Sunlight", "lights/Volumetricspotlight", "objects/Floor/Floor", "SkyBox", "image", "base64"], 
-function( _, postprocessing, shaders, PlgTween, 
+function( _, postprocessing, shaders, interactive, loaders, PlgTween, 
             ModelDatGui,  Factory,
             Sunlight, Volumetricspotlight, Floor, SkyBox ){
-    return _.extend( {}, postprocessing, shaders, {
+    return _.extend( {}, postprocessing, shaders, interactive, loaders, {
         PlgTween    : PlgTween,
         Factory     : Factory,
         ModelDatGui : ModelDatGui,
@@ -100709,8 +108572,8 @@ define('threeVP-Animation',["chaser/PositionChaser", "chaser/RotationChaser", "c
  * To change this template file, choose Tools | Templates
  * and open the template in the editor.
  */
-define('threeVP',["base64", "lodash", "Viewport", "threeVP-Loaders", "threeVP-Interactive", "threeVP-Extras", "threeVP-Animation"], function(base64, _, pack, Viewport, Loaders, Interactive, threeVPExtras, Animation ){
-    return _.extend({}, pack, Viewport, Loaders, Interactive, threeVPExtras, Animation);
+define('threeVP',["base64", "lodash", "Viewport", "threeVP-Extras", "threeVP-Animation"], function(base64, _, pack, Viewport, threeVPExtras, Animation ){
+    return _.extend({}, pack, Viewport, threeVPExtras, Animation);
 });
 
 

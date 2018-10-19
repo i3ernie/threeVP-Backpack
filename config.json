@@ -6,6 +6,7 @@
         "extras"    : "extras",
         "lodash"    : "vendor/lodash/lodash",
         "objects"   : "extras/objects",
+        "chaser"    : "extras/chaser",
         
         "threeVP"      : "threeVP",
         
@@ -14,6 +15,7 @@
         "text"      : "vendor/require/text",
         "base64"    : "vendor/require/base64",
         "image"     : "vendor/require/image",
+        
         
         "core"                  : "vendor/threeVP/core",
         "threeVP-Extras"        : "vendor/threeVP/threeVP-Extras",
