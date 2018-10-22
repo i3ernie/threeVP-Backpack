@@ -10638,8 +10638,298 @@ define('ObjectDAE',["three", "lodash", "ColladaLoader"], function( THREE, _, Col
  * To change this template file, choose Tools | Templates
  * and open the template in the editor.
  */
+define('loaders/Loader',["lodash"], function( _ ){
+    
+    Loader = function( data, defaults, opts ){
+        defaults = defaults || {};
+        this.data = data || {};
+        this.options = _.extend({}, defaults, opts);
+    };
+    
+    Loader.prototype.load = function(){
+        
+    };
+    
+    Loader.prototype.done = function( sc, ret ){
+        //var scope = sc || this; 
+        var scope = this;
+        var data = ret || scope.data;
+    
+        if ( scope.options.eventEmitter ) { scope.options.eventEmitter.trigger( scope.options.trigger, ret ); }
+        if ( typeof scope.callback === "function" ) { scope.callback( null, data ); }
+    };
+    
+    return Loader;
+});
 
-define('pack-Loaders',["ColladaLoader", "OBJLoader", "MTLLoader", "UniversalLoader", "ObjectDAE"], function( ColladaLoader, OBJLoader, MTLLoader, UniversalLoader, ObjectDAE ){
+
+/**
+ * @license RequireJS i18n 2.0.4 Copyright (c) 2010-2012, The Dojo Foundation All Rights Reserved.
+ * Available via the MIT or new BSD license.
+ * see: http://github.com/requirejs/i18n for details
+ */
+/*jslint regexp: true */
+/*global require: false, navigator: false, define: false */
+
+/**
+ * This plugin handles i18n! prefixed modules. It does the following:
+ *
+ * 1) A regular module can have a dependency on an i18n bundle, but the regular
+ * module does not want to specify what locale to load. So it just specifies
+ * the top-level bundle, like "i18n!nls/colors".
+ *
+ * This plugin will load the i18n bundle at nls/colors, see that it is a root/master
+ * bundle since it does not have a locale in its name. It will then try to find
+ * the best match locale available in that master bundle, then request all the
+ * locale pieces for that best match locale. For instance, if the locale is "en-us",
+ * then the plugin will ask for the "en-us", "en" and "root" bundles to be loaded
+ * (but only if they are specified on the master bundle).
+ *
+ * Once all the bundles for the locale pieces load, then it mixes in all those
+ * locale pieces into each other, then finally sets the context.defined value
+ * for the nls/colors bundle to be that mixed in locale.
+ *
+ * 2) A regular module specifies a specific locale to load. For instance,
+ * i18n!nls/fr-fr/colors. In this case, the plugin needs to load the master bundle
+ * first, at nls/colors, then figure out what the best match locale is for fr-fr,
+ * since maybe only fr or just root is defined for that locale. Once that best
+ * fit is found, all of its locale pieces need to have their bundles loaded.
+ *
+ * Once all the bundles for the locale pieces load, then it mixes in all those
+ * locale pieces into each other, then finally sets the context.defined value
+ * for the nls/fr-fr/colors bundle to be that mixed in locale.
+ */
+(function () {
+    'use strict';
+
+    //regexp for reconstructing the master bundle name from parts of the regexp match
+    //nlsRegExp.exec("foo/bar/baz/nls/en-ca/foo") gives:
+    //["foo/bar/baz/nls/en-ca/foo", "foo/bar/baz/nls/", "/", "/", "en-ca", "foo"]
+    //nlsRegExp.exec("foo/bar/baz/nls/foo") gives:
+    //["foo/bar/baz/nls/foo", "foo/bar/baz/nls/", "/", "/", "foo", ""]
+    //so, if match[5] is blank, it means this is the top bundle definition.
+    var nlsRegExp = /(^.*(^|\/)nls(\/|$))([^\/]*)\/?([^\/]*)/;
+
+    //Helper function to avoid repeating code. Lots of arguments in the
+    //desire to stay functional and support RequireJS contexts without having
+    //to know about the RequireJS contexts.
+    function addPart(locale, master, needed, toLoad, prefix, suffix) {
+        if (master[locale]) {
+            needed.push(locale);
+            if (master[locale] === true || master[locale] === 1) {
+                toLoad.push(prefix + locale + '/' + suffix);
+            }
+        }
+    }
+
+    function addIfExists(req, locale, toLoad, prefix, suffix) {
+        var fullName = prefix + locale + '/' + suffix;
+        if (require._fileExists(req.toUrl(fullName + '.js'))) {
+            toLoad.push(fullName);
+        }
+    }
+
+    /**
+     * Simple function to mix in properties from source into target,
+     * but only if target does not already have a property of the same name.
+     * This is not robust in IE for transferring methods that match
+     * Object.prototype names, but the uses of mixin here seem unlikely to
+     * trigger a problem related to that.
+     */
+    function mixin(target, source, force) {
+        var prop;
+        for (prop in source) {
+            if (source.hasOwnProperty(prop) && (!target.hasOwnProperty(prop) || force)) {
+                target[prop] = source[prop];
+            } else if (typeof source[prop] === 'object') {
+                if (!target[prop] && source[prop]) {
+                    target[prop] = {};
+                }
+                mixin(target[prop], source[prop], force);
+            }
+        }
+    }
+
+    define('i18n',['module'], function (module) {
+        var masterConfig = module.config ? module.config() : {};
+
+        return {
+            version: '2.0.4',
+            /**
+             * Called when a dependency needs to be loaded.
+             */
+            load: function (name, req, onLoad, config) {
+                config = config || {};
+
+                if (config.locale) {
+                    masterConfig.locale = config.locale;
+                }
+
+                var masterName,
+                    match = nlsRegExp.exec(name),
+                    prefix = match[1],
+                    locale = match[4],
+                    suffix = match[5],
+                    parts = locale.split("-"),
+                    toLoad = [],
+                    value = {},
+                    i, part, current = "";
+
+                //If match[5] is blank, it means this is the top bundle definition,
+                //so it does not have to be handled. Locale-specific requests
+                //will have a match[4] value but no match[5]
+                if (match[5]) {
+                    //locale-specific bundle
+                    prefix = match[1];
+                    masterName = prefix + suffix;
+                } else {
+                    //Top-level bundle.
+                    masterName = name;
+                    suffix = match[4];
+                    locale = masterConfig.locale;
+                    if (!locale) {
+                        locale = masterConfig.locale =
+                            typeof navigator === "undefined" ? "root" :
+                            (navigator.language ||
+                             navigator.userLanguage || "root").toLowerCase();
+                    }
+                    parts = locale.split("-");
+                }
+
+                if (config.isBuild) {
+                    //Check for existence of all locale possible files and
+                    //require them if exist.
+                    toLoad.push(masterName);
+                    addIfExists(req, "root", toLoad, prefix, suffix);
+                    for (i = 0; i < parts.length; i++) {
+                        part = parts[i];
+                        current += (current ? "-" : "") + part;
+                        addIfExists(req, current, toLoad, prefix, suffix);
+                    }
+
+                    req(toLoad, function () {
+                        onLoad();
+                    });
+                } else {
+                    //First, fetch the master bundle, it knows what locales are available.
+                    req([masterName], function (master) {
+                        //Figure out the best fit
+                        var needed = [],
+                            part;
+
+                        //Always allow for root, then do the rest of the locale parts.
+                        addPart("root", master, needed, toLoad, prefix, suffix);
+                        for (i = 0; i < parts.length; i++) {
+                            part = parts[i];
+                            current += (current ? "-" : "") + part;
+                            addPart(current, master, needed, toLoad, prefix, suffix);
+                        }
+
+                        //Load all the parts missing.
+                        req(toLoad, function () {
+                            var i, partBundle, part;
+                            for (i = needed.length - 1; i > -1 && needed[i]; i--) {
+                                part = needed[i];
+                                partBundle = master[part];
+                                if (partBundle === true || partBundle === 1) {
+                                    partBundle = req(prefix + part + '/' + suffix);
+                                }
+                                mixin(value, partBundle);
+                            }
+
+                            //All done, notify the loader.
+                            onLoad(value);
+                        });
+                    });
+                }
+            }
+        };
+    });
+}());
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('loaders/Loader.Languages',["lodash", "./Loader", "i18n"], function( _, Loader )
+{
+    var options = {path:{conf:"conf/",locale:"locale/"}};
+    
+    var _setLocale = function( obj )
+        { 
+            var aFiles = [];
+            var s = _.size( obj );
+
+            _.each( obj, ( v, k ) => {
+                this.Locale[k] = {};
+                aFiles = [];
+                _.each(v, ( file ) => {
+                    aFiles.push("i18n!"+ this.options.path.locale+file);
+                });
+                require( aFiles, function(){
+                    s--;
+                    for ( var i=0; i<arguments.length; i++ )
+                    {
+                        _.extend(this.Locale[k], arguments[i]);
+                    }
+                    if ( s === 0) this.done( this );
+                }.bind(this));
+            });
+    };
+    
+    var LangLoader = function( data, opt )
+    {
+        var scope = this;
+        this.Locale = {};
+        Loader.call( this, data, options, opt);	
+        this.load = function(){ scope._load.apply( scope, arguments ); };
+    };
+        
+    LangLoader.prototype = _.create( Loader.prototype, {
+        constructor : LangLoader,
+
+        _load : function( callback )
+        {
+            var aFiles = [];
+            var oFiles = {};
+            var a = _.isString( this.data.files.locale )? [this.data.files.locale] : this.data.files.locale;
+
+            this.callback = callback;
+            _.each(a, ( file ) => {
+                aFiles.push("json!" + this.options.path.conf+file);
+            });
+
+            require( aFiles, function()
+            {
+                oFiles = arguments[0];
+
+                if (arguments.length > 1) {
+                    for ( var i =1; i<arguments.length; i++ ){
+                        _.each(arguments[i], function(v,k){
+                            if ( oFiles[k] ) {oFiles[k] = _.union(oFiles[k],v); }
+                            else {oFiles[k] = v;}
+                        });
+                    }
+                }
+
+                _setLocale.call( this, oFiles );
+
+            }.bind(this));
+        }
+    });
+        
+    return LangLoader;
+});
+
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('pack-Loaders',["ColladaLoader", "OBJLoader", "MTLLoader", "UniversalLoader", "ObjectDAE", "loaders/Loader.Languages"], function( ColladaLoader, OBJLoader, MTLLoader, UniversalLoader, ObjectDAE ){
     return {
         ColladaLoader   : ColladaLoader,
         OBJLoader       : OBJLoader,
@@ -10647,6 +10937,496 @@ define('pack-Loaders',["ColladaLoader", "OBJLoader", "MTLLoader", "UniversalLoad
         UniversalLoader : UniversalLoader,
         ObjectDAE       : ObjectDAE
     };
+});
+
+/**
+ * Created by Hessberger on 18.03.2015.
+ */
+define('chaser/PositionChaser',["tween"], function ( TWEEN ) {
+
+    var PositionChaser = function(obj, opt)
+    {
+        opt = opt || {};
+        var sliderange = opt.sliderange || 20;
+        var time = 2000;
+        var axis = opt.axis || "z";
+        var start = obj.position[axis];
+        var stop = start + sliderange;
+        var to = stop;
+        var position = {  z: start };
+        var target = {  z: to };
+        var animate = false;
+
+
+        var tween = new TWEEN.Tween(position).to(target, time)
+            .onStart(function(){
+                animate = true;
+            })
+            .onComplete(function(){
+                animate = false;
+                to = (to == start)? stop:start;
+                tween.to({z: to}, time);
+            })
+            .onStop(function(){
+                animate = false;
+                to = (to == start)? stop:start;
+                tween.to({z: to}, time);
+            })
+            .onUpdate(function(){
+                obj.position[axis] = position.z;
+            });
+        this.toggle = function(){
+            if (animate) {tween.stop(); }
+            else tween.start();
+        };
+        this.close = function(){
+            if( position.z == start ) return;
+            if (animate) {tween.stop(); }
+            tween.start();
+        };
+    };
+    
+    return PositionChaser;
+});
+/**
+ * Created by Hessberger on 18.03.2015.
+ */
+define('chaser/RotationChaser',["lodash", "tween"], function ( _, TWEEN ) {
+    
+    var defaults = {
+        hinge:"left",
+        dir:"y",
+        odir:"in",
+        val:1.57
+    };
+    
+    var dirs = {"left":"y", "right":"y", "top" : "x", "bottom" : "x"};
+
+    var RotationChaser = function( obj, opt )
+    {
+        opt = opt || {};
+        var options = _.extend(defaults, opt);
+        options.dir = dirs[options.hinge] || defaults.dir;
+        var angle = {left:-options.val, right:options.val, o:-options.val, u:options.val, in:1, out:-1};
+        var start = obj.rotation[options.dir];
+        var stop = start+angle[options.hinge]*angle[options.odir];
+        var to = stop;
+        var rotation = {  y: start };
+        var target = {  y: stop };
+        var animate = false;
+        var time = 2000;
+
+        var tween = new TWEEN.Tween( rotation ).to(target, time)
+        .onStart(function(){
+            animate = true;
+        })
+        .onComplete(function(){
+            animate = false;
+            to = (to === start)? stop:start;
+            tween.to({y: to}, time);
+        })
+        .onStop(function(){
+            animate = false;
+            to = (to === start)? stop:start;
+            tween.to({y: to}, time);
+        })
+        .onUpdate(function(){
+            obj.rotation[options.dir] = rotation.y;
+        });
+
+        this.start = function(){
+            tween.start();
+        };
+        this.toggle = function(){
+            if ( animate ) tween.stop();
+            else tween.start();
+        };
+        this.close = function(){
+            if( rotation.y === start ) return;
+            if (animate) {tween.stop(); }
+            tween.start();
+        };
+
+    };
+    return RotationChaser;
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('chaser/PositionTween',["chaser/PositionChaser"], function( Chaser ){
+    
+    var makeTween = function( DomEvents, mLade )
+    {
+        var o = this.model.attributes;
+        
+        var tween = new Chaser( mLade, {odir:o.dir} );
+        
+        var onClick = function( ev ){
+            ev.cancelBubble = true;
+            tween.toggle();
+        };
+        DomEvents.addEventListener( mLade, "click", onClick );
+        mLade.addEventListener("removed", function(){ DomEvents.removeEventListener( mLade, "click", onClick ); });
+    };
+    return makeTween;
+
+});
+
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('pack-Animation',["chaser/PositionChaser", "chaser/RotationChaser", "chaser/PositionTween"], function( PositionChaser, RotationChaser, PositionTween ){
+    return {
+        PositionChaser : PositionChaser,
+        RotationChaser : RotationChaser,
+        PositionTween  : PositionTween
+    };
+});
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+define('factorys/Factory',["lodash"], function( _ ){
+    var Factory = function (){
+        this.catalog = {};
+        this.models = {};
+    };
+    
+    _.extend( Factory.prototype, {
+        
+        loadCatalog : function( urlCat, callback ){
+            require(["json!"+urlCat], function( objCat ){
+                this.addCatalog( objCat );
+                if ( callback ) { callback(this); }
+            }.bind(this));
+        },
+        
+        addCatalog : function( objCat ){
+            _.extend( this.catalog, objCat );
+        },
+        
+        /**
+         * 
+         * @param {type} name
+         * @param {type} opts
+         * @returns {this.models}
+         */
+        get : function( name, opts ){
+            return new this.models[name]( opts );
+        },
+        
+        set : function( name, obj ){
+            this.models[name] = obj;
+        }
+    });
+    return Factory;
+});
+
+/* 
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+define('factorys/MaterialFactory',["three", "lodash", "factorys/Factory", "module"], function( THREE, _, Factory, module ){
+
+    var catalog = {}, presets = {};
+    var loaderMat = new THREE.MaterialLoader();
+    var loaderTex = new THREE.TextureLoader();
+    var loaderImg = new THREE.ImageLoader();
+    var RGBFormat = 1022;
+    var RGBAFormat = 1023;
+    var colors = ['color', 'emissive', 'specular'];
+    var tempColor = new THREE.Color();
+
+    var options = {
+        texturePath : "textures/",
+        defaultMatType : "MeshPhongMaterial",
+        myPath      : module.uri.substring(0, module.uri.lastIndexOf("/")+1 ) + "textures/",
+        debug       : false,
+        reflection  : false,
+        WIDTH       : window.innerWidth,
+        HEIGHT      : window.innerHeight,
+        clipBias    : 0.003,
+        color       : 0x777777
+    };
+
+    var setUV = function( jsonMaterial )
+    {
+        var trans = {};
+        if (jsonMaterial.userData.size)
+        {
+            trans.size = jsonMaterial.userData.size;
+            var u = 100 / trans.size[0];
+            var v = 100 / trans.size[1];
+
+            if ( u === 1.0 ) u = 0.9999;
+            if ( v === 1.0 ) v = 0.9999;
+   
+            if (!jsonMaterial.map.wrap) jsonMaterial.map.wrap = [THREE.RepeatWrapping, THREE.RepeatWrapping];
+            jsonMaterial.map.repeat = [u, v];
+        }
+        
+        return jsonMaterial;
+    };
+
+    var MFactory = function( objCat, opt )
+    {
+        if ( objCat ) {
+            if ( objCat.materials ) {
+                this.addCatalog( objCat.materials );
+            } else {
+                this.addCatalog( objCat );
+            }
+        }
+        
+        this.options = _.extend( {}, options, opt );
+
+        this.textures = {};
+        this.materials = {};
+
+        loaderImg.setPath( this.options.texturePath );
+        loaderMat.setTextures( this.textures );
+    };
+    
+    MFactory.prototype = _.create( Factory.prototype, {
+        
+        constructor : MFactory,
+        
+        loadCatalog : function( urlCat, callback )
+        {
+            require(["json!"+urlCat], function( objCat ){
+                this.addCatalog( objCat );
+                if ( typeof callback === "function" ) { 
+                    callback( this ); 
+                }
+            }.bind(this));
+        },
+
+        loadPresets : function( url )
+        {
+            require(["json!"+url], function( obj ){
+                this.addPresets( obj );
+            }.bind(this));
+        },
+        
+        addCatalog : function( objCat ){ 
+            _.each( objCat, function( mat ){
+                if ( !mat.userData ) mat.userData = {};
+                _.each( colors, function( col ){
+                    if ( mat[col] ){
+                        if ( mat[col] instanceof Array ) {
+                            mat.userData[col] = mat[col];
+                            tempColor.setRGB( mat[col][0], mat[col][1], mat[col][2] );
+                            mat[col] = tempColor.getHex();
+                        }
+                        if ( typeof mat[col] === "string" ) {
+                            mat.userData[col] = mat[col];
+                            tempColor.setStyle( mat[col] );
+                            mat[col] = tempColor.getHex();
+                        }
+                    }
+                });
+            });
+
+            _.extend( catalog, objCat );
+        },
+        
+        addPresets : function( obj ){
+            _.extend( presets, obj );
+        },
+        
+        /**
+         * 
+         * @param {type} matKey
+         * @returns {undefined}
+         */
+        deleteMaterial : function( matKey ){
+            if ( this.materials[ matKey ] ) { 
+                this.materials[ matKey ].dispose();
+                this.materials[ matKey ] = null; 
+            }
+        },
+        
+        enableReflection : function( VP ){
+            this.VP = VP;
+            this.options.reflection = true;
+            var cubeCamera1 = new THREE.CubeCamera( 1, 1000, 256 );
+            
+            cubeCamera1.renderTarget.texture.minFilter = THREE.LinearMipMapLinearFilter;
+            cubeCamera1.position.set(0, 5, 0);
+            VP.scene.add( cubeCamera1 );
+            this.planeMirror = cubeCamera1.renderTarget;
+            VP.loop.add( function(){ cubeCamera1.updateCubeMap( VP.renderer, VP.scene ); });
+        },
+
+        /**
+         *
+         * @param matKey {string} key of material
+         * @param copy {boolean} return copy or reference
+         * @returns {*}
+         */
+        getMaterial : function( matKey, copy )
+        {
+            if ( copy === undefined ) copy = true;
+            
+            if ( !catalog[ matKey ] ) {
+                return null;
+            }
+
+            //cached?
+            if ( this.materials[ matKey ] ){ 
+                return ( copy )? this.materials[ matKey ].clone() : this.materials[ matKey ];
+            }
+
+            var jsonCatMat = catalog[ matKey ];
+            var jsonMaterial = _.clone( jsonCatMat );
+            var mapDefault = { wrap:[], magFilter:[] };
+
+            if ( !jsonMaterial.type ) jsonMaterial.type = options.defaultMatType;
+
+            if ( jsonMaterial.userData && jsonMaterial.userData.preset && presets[jsonMaterial.userData.preset] ){
+                jsonMaterial = _.extend({}, presets[jsonMaterial.userData.preset], jsonMaterial );
+            }
+
+            if ( jsonCatMat.map )
+            {
+                if ( jsonMaterial.map.wrap ) {
+                    if ( typeof jsonMaterial.map.wrap[0] === "string" ) { 
+                        jsonMaterial.map.wrap[0] = THREE[jsonMaterial.map.wrap[0]]; 
+                    }
+                    if ( typeof jsonMaterial.map.wrap[1] === "string" ) {
+                        jsonMaterial.map.wrap[1] = THREE[jsonMaterial.map.wrap[1]];
+                    }
+                } else{
+                    if ( jsonMaterial.map.rotation ) {
+                        jsonMaterial.map.wrap = [THREE.RepeatWrapping, THREE.RepeatWrapping];
+                    }
+                }
+                
+                if ( jsonMaterial.userData && jsonMaterial.userData.size ) {
+                    setUV( jsonMaterial );
+                }
+                
+                mapDefault = _.extend(mapDefault, jsonCatMat.map );
+                
+                this._createTexture("map", jsonMaterial, mapDefault);
+            }
+            
+            var maps = ["bumpMap", "roughnessMap", "alphaMap", "normalMap", "emissiveMap", "specularMap"];
+            
+            //Maps
+            _.each( maps , function( mapName ){
+                if ( jsonCatMat[ mapName ] ) {
+                    this._createTexture( mapName, jsonMaterial, mapDefault );
+                }
+            }.bind(this));
+
+            //envMap
+            if ( jsonCatMat.envMap ) {
+                
+                if ( !jsonCatMat.envMap.image === "flatMirror" ){
+                    this._createTexture("envMap", jsonMaterial, mapDefault);
+                } else {
+                    jsonMaterial.envMap = null;
+                }
+            }
+
+            this.materials[ matKey ] = loaderMat.parse( jsonMaterial );
+
+            if (jsonMaterial.userData) {
+                this.materials[ matKey ].userData = jsonMaterial.userData;
+            }
+
+            if ( jsonCatMat.envMap  && jsonCatMat.envMap.image === "flatMirror" && this.options.reflection ) {
+
+                this.materials[ matKey ].envMap = this.planeMirror;
+                 this.VP.loop.add( function(){ 
+                     this.materials[ matKey ].envMap = this.planeMirror.texture;
+                 }.bind(this));
+               
+            }
+            
+            return ( copy )? this.materials[ matKey ].clone() : this.materials[ matKey ];
+        },
+        
+        _createTexture : function( map, jsonMaterial, defaultMap )
+        {
+            var myMap = jsonMaterial[ map ];
+            var texName = map+"_"+myMap.image;
+
+            if ( this.textures[ texName ] ) {
+                jsonMaterial[map] = texName;
+                return;
+            }
+
+            var mapOpt = {
+                    mapping     : myMap.mapping || defaultMap.mapping, 
+                    wrapS       : myMap.wrap ? myMap.wrap[0] : defaultMap.wrap[0], 
+                    wrapT       : myMap.wrap ? myMap.wrap[1] : defaultMap.wrap[1], 
+                    magFilter   : myMap.magFilter ? myMap.magFilter[0] : defaultMap.magFilter[0], 
+                    minFilter   : myMap.magFilter ? myMap.magFilter[1] : defaultMap.magFilter[1], 
+                    format      : myMap.format      || map.format,
+                    type        : myMap.type        || defaultMap.type,
+                    anisotropy  : myMap.anisotropy  || defaultMap.anisotropy,
+                    encoding    : myMap.encoding    || defaultMap.encoding,
+                    rotation    : myMap.rotation ? myMap.rotation : defaultMap.rotation || 0,
+                    center      : myMap.center ? myMap.center : [0,0]
+            };
+
+            this.textures[ texName ] = new THREE.Texture( undefined, mapOpt.mapping, mapOpt.wrapS, mapOpt.wrapT, mapOpt.magFilter, mapOpt.minFilter, mapOpt.format, mapOpt.type, mapOpt.anisotropy, mapOpt.encoding );
+            
+            
+            if ( myMap.repeat ) this.textures[ texName ].repeat.fromArray(  myMap.repeat );
+            if ( myMap.rotation ) this.textures[ texName ].rotation = myMap.rotation;
+            
+            jsonMaterial[ map ] = texName;
+                            
+            this.loadImage( this.textures[ texName ], myMap.image );
+        },
+        
+        loadImage : function( texture, url )
+        {    
+            var onProgress = function(){};
+            var onError = function(){};
+            
+            loaderImg.load( url, function ( image ) 
+            {
+                // JPEGs can't have an alpha channel, so memory can be saved by storing them as RGB.
+                var isJPEG = url.search( /\.(jpg|jpeg)$/ ) > 0 || url.search( /^data\:image\/jpeg/ ) === 0;
+
+                texture.format = isJPEG ? RGBFormat : RGBAFormat;
+                texture.image = image;
+                texture.needsUpdate = true;
+
+            }, onProgress, onError );
+        }
+    });
+
+    return MFactory;
+});
+/**
+ * 
+ * @param {type} THREE
+ * @param {type} _
+ * @param {type} $
+ * @param {type} Backbone
+ * @param {type} CMD
+ * @returns {packL#5.packAnonym$1}
+ */
+
+define('pack-Factorys',[ "factorys/MaterialFactory"], 
+function( MaterialFactory ) {
+    return {
+        MaterialFactory       : MaterialFactory
+     };
 });
 
 /* 
@@ -10744,48 +11524,6 @@ define('utilities/ModelDatGui',["lodash", "dat-gui", "cmd"], function(_, dat, CM
     return ModelDatGUI;
 });
 
-
-/* 
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-define('factorys/Factory',["lodash"], function( _ ){
-    var Factory = function (){
-        this.catalog = {};
-        this.models = {};
-    };
-    
-    _.extend( Factory.prototype, {
-        
-        loadCatalog : function( urlCat, callback ){
-            require(["json!"+urlCat], function( objCat ){
-                this.addCatalog( objCat );
-                if ( callback ) { callback(this); }
-            }.bind(this));
-        },
-        
-        addCatalog : function( objCat ){
-            _.extend( this.catalog, objCat );
-        },
-        
-        /**
-         * 
-         * @param {type} name
-         * @param {type} opts
-         * @returns {this.models}
-         */
-        get : function( name, opts ){
-            return new this.models[name]( opts );
-        },
-        
-        set : function( name, obj ){
-            this.models[name] = obj;
-        }
-    });
-    return Factory;
-});
 
 define('vendor/three/utils/ShadowMapViewer',["three"], function(THREE){
 /**
@@ -11862,13 +12600,13 @@ define('image',[],function(){
  * To change this template file, choose Tools | Templates
  * and open the template in the editor.
  */
-define('threeVP-Extras',["lodash", "pack-postprocessing", "pack-shaders", "pack-Interactive", "pack-Loaders", "plugins/plg.Tween", 
+define('threeVP-Extras',["lodash", "pack-postprocessing", "pack-shaders", "pack-Interactive", "pack-Loaders", "pack-Animation", "pack-Factorys", "plugins/plg.Tween", 
     "utilities/ModelDatGui", "factorys/Factory",
-    "lights/Sunlight", "lights/Volumetricspotlight", "objects/Floor/Floor", "SkyBox", "image", "base64"], 
-function( _, postprocessing, shaders, interactive, loaders, PlgTween, 
+    "lights/Sunlight", "lights/Volumetricspotlight", "objects/Floor/Floor", "SkyBox", "image", "base64", "i18n"], 
+function( _, postprocessing, shaders, interactive, loaders, animation, factorys, PlgTween, 
             ModelDatGui,  Factory,
             Sunlight, Volumetricspotlight, Floor, SkyBox ){
-    return _.extend( {}, postprocessing, shaders, interactive, loaders, {
+    return _.extend( {}, postprocessing, shaders, interactive, loaders, animation, factorys, {
         PlgTween    : PlgTween,
         Factory     : Factory,
         ModelDatGui : ModelDatGui,

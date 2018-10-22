@@ -34,7 +34,6 @@
     ],
     "dependencies": {
         "threeVP": "git://github.com/i3ernie/threeVP.js.git",
-        "threeVP-Animation": "git://github.com/i3ernie/threeVP-Animation.js.git",
         "threeVP-Extras": "git://github.com/i3ernie/threeVP-Extras.js.git",
         "threeVP-MaterialFactory": "git://github.com/i3ernie/threeVP-MaterialFactory.js.git"
     },
