@@ -41,7 +41,7 @@
         "gulp-load-plugins": "latest",
         "gulp-requirejs": "^1.2.0",
         "gulp-uglify": "^3.0.1",
-        "lodash": "^4.17.11",
+        "lodash": "latest",
         "requirejs": "^2.3.6"
     },
     "scripts": {
